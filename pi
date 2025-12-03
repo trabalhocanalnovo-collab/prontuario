@@ -1,0 +1,3688 @@
+# -*- coding: utf-8 -*-
+"""
+Prontuário Médico Moderno — PyQt5 + SQLite + Matplotlib (Versão OO)
+Autor: ChatGPT + Refatoração OO
+Data: 2025-09-14
+
+Recursos (Fase 1→4) + Melhorias OO:
+- Login/Cadastro (Paciente: usuário/senha; Médico: ID/senha) — SQLite
+- Tela principal com QTabWidget + ícones QtAwesome
+- Dashboard com cards (Consultas, Exames, Mensagens)
+- Dark/Light Mode (QSS) com persistência por usuário
+- Agenda do Médico (calendário + lista, status)
+- Paciente: marcar/cancelar consulta; ver mensagens e exames; histórico clínico
+- Médico: conversar, listar pacientes, inserir resultados e anexos de exames, prescrições
+- Gráficos de exames (matplotlib) com faixa etária de referência
+- Upload de exames (PDF/Imagem) e visualização (abre com app padrão do SO)
+- Prescrição digital (médico cria; paciente visualiza)
+- Anotações privadas do médico por paciente
+- Relatórios em PDF (ReportLab) e exportação CSV
+- NOVO: Programação Orientada a Objetos
+- NOVO: Anamnese (ao invés de consulta)
+- NOVO: Sistema de farmácia e controle de estoque
+- NOVO: Diferenciação entre prescrição hospitalar e receituário
+
+# MELHORIAS SUGERIDAS:
+# - Integração com Sistemas Externos (Laboratórios, Farmácias, Convênios) - Esqueletos
+# - Telemedicina (Videochamadas, Chat em Tempo Real) - Esqueletos
+# - Inteligência Artificial/Machine Learning (Alertas, Sugestões, Análise de Tendências) - Esqueletos
+# - Gestão de Documentos e Consentimentos (Termos Eletrônicos, Upload Diversos) - Esqueletos
+# - Personalização e Acessibilidade (Mais Temas, Idiomas, Contraste) - Esqueletos
+# - Funcionalidades para o Paciente (Lembretes Medicação, Diário Sintomas, Educação Saúde) - Esqueletos
+# - Funcionalidades para o Médico (Modelos Anamnese, Calculadoras Médicas, Gestão Tarefas) - Esqueletos
+# - Segurança e Auditoria (Log Auditoria, 2FA) - Esqueletos
+# - Melhorias na Interface do Usuário (Arrastar e Soltar, Notificações, Busca Global) - Esqueletos
+# - EXPANSÃO DA LISTA DE EXAMES (REFERENCE_RANGES)
+
+Instruções:
+    pip install pyqt5 matplotlib qtawesome reportlab
+    python prontuario_oo.py
+"""
+
+import os, sys, sqlite3, hashlib, csv, webbrowser
+from datetime import datetime, date, time
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass, field
+from enum import Enum
+
+from PyQt5.QtCore import Qt, QDate, QDateTime, QSize, QTimer, QRect
+from PyQt5.QtGui import QIcon, QColor, QFont
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QMainWindow, QDialog, QFileDialog, QMessageBox,
+    QLabel, QLineEdit, QTextEdit, QComboBox, QPushButton, QDateEdit, QDateTimeEdit,
+    QGridLayout, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget, QStackedWidget, QListWidget, QListWidgetItem,
+    QFrame, QSplitter, QCheckBox, QSpinBox, QCalendarWidget, QScrollArea,
+    QInputDialog, QDesktopWidget)  # Para 2FA e resolução da tela
+
+# --- Exceções não tratadas: evitar fechamento silencioso/abort do Qt ---
+def _qt_excepthook(exctype, value, tb):
+    import traceback, sys as _sys
+    msg = "".join(traceback.format_exception(exctype, value, tb))
+    print(msg)  # sempre loga no console
+    try:
+        QMessageBox.critical(None, "Erro não tratado", msg)
+    except Exception:
+        pass
+    _sys.__excepthook__(exctype, value, tb)
+sys.excepthook = _qt_excepthook
+
+
+# Matplotlib
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+# Ícones (QtAwesome) - fallback se não instalado
+try:
+    import qtawesome as qta
+except Exception:
+    qta = None
+
+# PDF (ReportLab) - fallback para aviso se não instalado
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+
+    REPORTLAB_OK = True
+except Exception:
+    REPORTLAB_OK = False
+
+APP_NAME = "Prontuário Moderno "
+DB_FILE = "prontuario_moderno_oo.db"
+
+# Variáveis globais para escala de resolução
+GLOBAL_SCALE_FACTOR = 1.0
+BASE_WIDTH = 1920  # Largura de referência para escala
+BASE_HEIGHT = 1080 # Altura de referência para escala
+
+def get_screen_resolution():
+    app = QApplication.instance()
+    if not app:
+        # Ainda sem QApplication (carregando módulo). Evite criar outra aqui.
+        return BASE_WIDTH, BASE_HEIGHT
+    screen = app.primaryScreen()
+    size = screen.size()
+    return size.width(), size.height()
+
+
+def calculate_scale_factor():
+    width, height = get_screen_resolution()
+    # Usa a menor proporção para garantir que a aplicação caiba na tela
+    scale_w = width / BASE_WIDTH
+    scale_h = height / BASE_HEIGHT
+    return min(scale_w, scale_h)
+
+# Calcula o fator de escala uma vez na inicialização
+GLOBAL_SCALE_FACTOR = calculate_scale_factor()
+
+def scaled_value(value: int) -> int:
+    return int(value * GLOBAL_SCALE_FACTOR)
+
+def scaled_font(font_size: int) -> QFont:
+    font = QFont()
+    font.setPointSize(scaled_value(font_size))
+    return font
+
+
+# --------------------------- ENUMS ---------------------------
+    QLabel, QLineEdit, QTextEdit, QComboBox, QPushButton, QDateEdit, QDateTimeEdit,
+    QGridLayout, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget, QStackedWidget, QListWidget, QListWidgetItem,
+    QFrame, QSplitter, QCheckBox, QSpinBox, QCalendarWidget, QScrollArea,
+    QInputDialog  # Para 2FA
+
+
+# Matplotlib
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+# Ícones (QtAwesome) - fallback se não instalado
+try:
+    import qtawesome as qta
+except Exception:
+    qta = None
+
+# PDF (ReportLab) - fallback para aviso se não instalado
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+
+    REPORTLAB_OK = True
+except Exception:
+    REPORTLAB_OK = False
+
+APP_NAME = "Prontuário Moderno "
+DB_FILE = "prontuario_moderno_oo.db"
+
+
+# --------------------------- ENUMS ---------------------------
+
+class UserRole(Enum):
+    PATIENT = "patient"
+    DOCTOR = "doctor"
+
+
+class AppointmentStatus(Enum):
+    SCHEDULED = "marcada"
+    COMPLETED = "realizada"
+    CANCELLED = "cancelada"
+
+
+class PrescriptionType(Enum):
+    HOSPITAL = "hospitalar"  # Para uso no hospital
+    OUTPATIENT = "receituario"  # Para o paciente levar para casa
+
+
+class MedicationStatus(Enum):
+    AVAILABLE = "disponivel"
+    LOW_STOCK = "estoque_baixo"
+    OUT_OF_STOCK = "sem_estoque"
+
+
+# --------------------------- DOMAIN CLASSES ---------------------------
+
+@dataclass
+class User:
+    id: Optional[int] = None
+    role: UserRole = UserRole.PATIENT
+    username: Optional[str] = None
+    doctor_login: Optional[str] = None
+    password_hash: str = ""
+    created_at: str = ""
+    # Novo: Campo para armazenar chave secreta 2FA (placeholder)
+    two_factor_secret: Optional[str] = None
+
+
+@dataclass
+class Patient:
+    user_id: int
+    full_name: str
+    cpf: str
+    birthdate: str
+    age: int
+    blood_type: str = ""
+    family_history: str = ""
+    allergies: str = ""
+    surgeries_history: str = ""
+    other_info: str = ""
+    # Novo: Diário de sintomas (placeholder)
+    symptom_diary: str = ""
+
+
+@dataclass
+class Doctor:
+    user_id: int
+    full_name: str
+    doctor_login: str
+    specialty: str = ""
+    crm: str = ""
+
+
+@dataclass
+class Appointment:
+    id: Optional[int] = None
+    patient_id: int = 0
+    doctor_id: int = 0
+    date_time: str = ""
+    reason: str = ""
+    status: AppointmentStatus = AppointmentStatus.SCHEDULED
+    notes: str = ""
+    anamnesis: str = ""  # Novo campo para anamnese
+
+
+@dataclass
+class Message:
+    id: Optional[int] = None
+    from_user: int = 0
+    to_user: int = 0
+    sent_at: str = ""
+    body: str = ""
+
+
+@dataclass
+class ExamResult:
+    id: Optional[int] = None
+    patient_id: int = 0
+    doctor_id: Optional[int] = None
+    exam_type: str = ""
+    value: float = 0.0
+    unit: str = ""
+    taken_at: str = ""
+    notes: str = ""
+
+
+@dataclass
+class ExamFile:
+    id: Optional[int] = None
+    patient_id: int = 0
+    doctor_id: Optional[int] = None
+    exam_type: str = ""
+    file_path: str = ""
+    uploaded_at: str = ""
+    # Novo: Tipo de documento (ex: "Consentimento", "Relatório")
+    document_type: str = "Exame"
+
+
+@dataclass
+class Medication:
+    id: Optional[int] = None
+    name: str = ""
+    description: str = ""
+    unit: str = ""
+    stock_quantity: int = 0
+    min_stock: int = 10
+    status: MedicationStatus = MedicationStatus.AVAILABLE
+
+
+@dataclass
+class Prescription:
+    id: Optional[int] = None
+    patient_id: int = 0
+    doctor_id: int = 0
+    created_at: str = ""
+    medication_id: int = 0
+    medication_name: str = ""
+    dosage: str = ""
+    instructions: str = ""
+    quantity: int = 1
+    prescription_type: PrescriptionType = PrescriptionType.OUTPATIENT
+
+
+@dataclass
+class Note:
+    id: Optional[int] = None
+    doctor_id: int = 0
+    patient_id: int = 0
+    created_at: str = ""
+    content: str = ""
+
+
+@dataclass
+class Settings:
+    user_id: int
+    theme: str = "dark"
+    # Novo: Idioma (placeholder)
+    language: str = "pt_BR"
+    # Novo: Modo de acessibilidade (placeholder)
+    accessibility_mode: bool = False
+
+
+# --------------------------- UTIL ---------------------------
+
+def sha256(txt: str) -> str:
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+
+def calc_age(birth_iso: str) -> int:
+    try:
+        b = date.fromisoformat(birth_iso)
+    except Exception:
+        return 0
+    today = date.today()
+    return today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+
+
+def icon(name: str, color: str = None, size: int = 18) -> QIcon:
+    if qta:
+        try:
+            return qta.icon(name, color=color) if color else qta.icon(name)
+        except Exception:
+            pass
+    return QIcon()  # fallback vazio
+
+
+# --------------------------- REFERÊNCIAS DE EXAMES (EXPANDIDO) ---------------------------
+
+REFERENCE_RANGES = {
+    'Glicose (jejum)': [((0, 12), (70, 99)), ((13, 59), (70, 99)), ((60, 200), (70, 110))],
+    'Hemoglobina': [((0, 12), (11.0, 15.5)), ((13, 59), (12.0, 17.5)), ((60, 200), (11.5, 17.0))],
+    'Colesterol total': [((0, 19), (0, 170)), ((20, 200), (0, 200))],
+    'Colesterol LDL': [((0, 19), (0, 110)), ((20, 200), (0, 130))],
+    'Colesterol HDL': [((0, 200), (40, 60))],
+    'Triglicerídeos': [((0, 19), (0, 90)), ((20, 200), (0, 150))],
+    'Creatinina': [((0, 12), (0.3, 0.7)), ((13, 59), (0.6, 1.2)), ((60, 200), (0.7, 1.5))],
+    'Ureia': [((0, 200), (15, 45))],
+    'TGO (AST)': [((0, 200), (0, 40))],
+    'TGP (ALT)': [((0, 200), (0, 40))],
+    'Bilirrubina Total': [((0, 200), (0.2, 1.2))],
+    'TSH': [((0, 200), (0.4, 4.0))],
+    'Sódio': [((0, 200), (135, 145))],
+    'Potássio': [((0, 200), (3.5, 5.0))],
+    'Vitamina D (25-OH)': [((0, 200), (30, 100))],
+    'Ácido Úrico': [((0, 200), (2.5, 7.0))],  # Varia por sexo, simplificado aqui
+    'PCR (Proteína C Reativa)': [((0, 200), (0, 5))],
+    'Hemácias': [((0, 12), (4.0, 5.5)), ((13, 59), (4.5, 6.0)), ((60, 200), (4.0, 5.5))],
+    'Leucócitos': [((0, 12), (5.0, 15.0)), ((13, 200), (4.0, 11.0))],
+    'Plaquetas': [((0, 200), (150, 450))],
+    'Hematócrito': [((0, 12), (30, 45)), ((13, 59), (37, 52)), ((60, 200), (35, 50))],
+}
+
+
+def ref_range_for_age(exam_type: str, age: int):
+    for (a_min, a_max), (lo, hi) in REFERENCE_RANGES.get(exam_type, []):
+        if a_min <= age <= a_max:
+            return (lo, hi)
+    return None
+
+# --------------------------- QSS THEMES (EXPANDIDO E ESCALÁVEL) ---------------------------
+
+def scale_qss(qss_template: str) -> str:
+    """Substitui placeholders em um template QSS por valores escalados."""
+    base_values = {
+        "font_size_13": 13,
+        "font_size_14": 14,
+        "padding_8": 8,
+        "padding_10": 10,
+        "padding_12": 12,
+        "padding_14": 14,
+        "radius_8": 8,
+        "radius_10": 10,
+        "radius_12": 12,
+        "margin_4": 4,
+    }
+    scaled_replacements = {key: scaled_value(value) for key, value in base_values.items()}
+    return qss_template.format(**scaled_replacements)
+
+QSS_DARK_TEMPLATE = """
+QWidget{{ background-color:#0b1220; color:#e6eef8; font-family: "Segoe UI", Roboto, Arial; font-size:{font_size_13}px;}}
+QLineEdit, QTextEdit, QComboBox, QDateEdit, QDateTimeEdit, QSpinBox, QCalendarWidget {{ background:#0b1726; border:1px solid #1f2a37; padding:{padding_8}px; border-radius:{radius_10}px; }}
+QPushButton {{ background:#2f80ed; border:none; padding:{padding_8}px {padding_12}px; border-radius:{radius_10}px; color:white; font-weight:600; }}
+QPushButton:hover {{ filter: brightness(110%); }}
+QPushButton[danger="true"]{{ background:#ef4444;}}
+QPushButton[accent="true"]{{ background:#10b981;}}
+QPushButton[warning="true"]{{ background:#f59e0b;}}
+QLabel[muted="true"]{{ color:#9aa6b2; }}
+QTableWidget{{ background:#0b1726; gridline-color:#1f2a37; }}
+QHeaderView::section{{ background:#0b1726; color:#9aa6b2; border:0; padding:{padding_8}px; }}
+QFrame#card{{ background:#0d1c30; border-radius:{radius_12}px; border:1px solid #18303b; padding:{padding_12}px; }}
+QTabBar::tab {{ background:#0b1726; padding:{padding_10}px {padding_14}px; border-radius:{radius_8}px; margin:{margin_4}px; }}
+QTabBar::tab:selected {{ background:#2f80ed; color:white; }}
+QCalendarWidget QToolButton {{ color: #e6eef8; }}
+QCalendarWidget QAbstractItemView {{ selection-background-color: #2f80ed; }}
+"""
+
+QSS_LIGHT_TEMPLATE = """
+QWidget{{ background-color:#f7fafc; color:#1f2937; font-family: "Segoe UI", Roboto, Arial; font-size:{font_size_13}px;}}
+QLineEdit, QTextEdit, QComboBox, QDateEdit, QDateTimeEdit, QSpinBox, QCalendarWidget {{ background:#ffffff; border:1px solid #d1d5db; padding:{padding_8}px; border-radius:{radius_10}px; }}
+QPushButton {{ background:#2563eb; border:none; padding:{padding_8}px {padding_12}px; border-radius:{radius_10}px; color:white; font-weight:600; }}
+QPushButton:hover {{ filter: brightness(110%); }}
+QPushButton[danger="true"]{{ background:#dc2626;}}
+QPushButton[accent="true"]{{ background:#059669;}}
+QPushButton[warning="true"]{{ background:#d97706;}}
+QLabel[muted="true"]{{ color:#6b7280; }}
+QTableWidget{{ background:#ffffff; gridline-color:#e5e7eb; }}
+QHeaderView::section{{ background:#ffffff; color:#6b7280; border:0; padding:{padding_8}px; }}
+QFrame#card{{ background:#ffffff; border-radius:{radius_12}px; border:1px solid #e5e7eb; padding:{padding_12}px; }}
+QTabBar::tab {{ background:#ffffff; padding:{padding_10}px {padding_14}px; border-radius:{radius_8}px; margin:{margin_4}px; border:1px solid #e5e7eb;}}
+QTabBar::tab:selected {{ background:#2563eb; color:white; }}
+QCalendarWidget QToolButton {{ color: #1f2937; }}
+QCalendarWidget QAbstractItemView {{ selection-background-color: #2563eb; }}
+"""
+
+QSS_HIGH_CONTRAST_TEMPLATE = """
+QWidget{{ background-color:#000000; color:#FFFF00; font-family: "Segoe UI", Roboto, Arial; font-size:{font_size_14}px;}}
+QLineEdit, QTextEdit, QComboBox, QDateEdit, QDateTimeEdit, QSpinBox, QCalendarWidget {{ background:#000000; border:2px solid #FFFF00; padding:{padding_8}px; border-radius:0px; color:#FFFF00; }}
+QPushButton {{ background:#0000FF; border:2px solid #FFFF00; padding:{padding_10}px {padding_14}px; border-radius:0px; color:#FFFF00; font-weight:bold; }}
+QPushButton:hover {{ background:#0000AA; }}
+QPushButton[danger="true"]{{ background:#FF0000;}}
+QPushButton[accent="true"]{{ background:#00FF00;}}
+QPushButton[warning="true"]{{ background:#FFA500;}}
+QLabel[muted="true"]{{ color:#AAAA00; }}
+QTableWidget{{ background:#000000; gridline-color:#FFFF00; color:#FFFF00; }}
+QHeaderView::section{{ background:#000000; color:#FFFF00; border:1px solid #FFFF00; padding:{padding_8}px; }}
+QFrame#card{{ background:#000000; border-radius:0px; border:2px solid #FFFF00; padding:{padding_12}px; }}
+QTabBar::tab {{ background:#000000; padding:{padding_10}px {padding_14}px; border-radius:0px; margin:{margin_4}px; border:2px solid #FFFF00; color:#FFFF00;}}
+QTabBar::tab:selected {{ background:#0000FF; color:#FFFF00; }}
+QCalendarWidget QToolButton {{ color: #FFFF00; }}
+QCalendarWidget QAbstractItemView {{ selection-background-color: #0000FF; }}
+"""
+
+# Gera as strings QSS finais na inicialização
+QSS_DARK = scale_qss(QSS_DARK_TEMPLATE)
+QSS_LIGHT = scale_qss(QSS_LIGHT_TEMPLATE)
+QSS_HIGH_CONTRAST = scale_qss(QSS_HIGH_CONTRAST_TEMPLATE)
+
+def _recompute_scaled_styles():
+    """Recalcula fator de escala e estilos depois que QApplication existir."""
+    global GLOBAL_SCALE_FACTOR, QSS_DARK, QSS_LIGHT, QSS_HIGH_CONTRAST
+    GLOBAL_SCALE_FACTOR = calculate_scale_factor()
+    QSS_DARK  = scale_qss(QSS_DARK_TEMPLATE)
+    QSS_LIGHT = scale_qss(QSS_LIGHT_TEMPLATE)
+    QSS_HIGH_CONTRAST = scale_qss(QSS_HIGH_CONTRAST_TEMPLATE)
+
+
+
+
+# --------------------------- BUSINESS LOGIC LAYER ---------------------------
+
+class PatientService:
+    def __init__(self, db):
+        self.db = db
+
+    def create_patient(self, user: User, patient: Patient) -> int:
+        """Cria um novo paciente no sistema"""
+        user_id = self.db.register_user(user)
+        patient.user_id = user_id
+        self.db.save_patient(patient)
+        return user_id
+
+    def get_patient(self, user_id: int) -> Optional[Patient]:
+        """Busca um paciente pelo ID do usuário"""
+        return self.db.get_patient(user_id)
+
+    def update_patient(self, patient: Patient):
+        """Atualiza os dados de um paciente"""
+        self.db.update_patient(patient)
+
+    def list_all_patients(self) -> List[Patient]:
+        """Lista todos os pacientes"""
+        return self.db.list_patients()
+
+    # Novo: Adicionar entrada no diário de sintomas
+    def add_symptom_entry(self, patient_id: int, entry: str):
+        # Isso seria mais complexo, talvez uma nova tabela para diário de sintomas
+        # Por enquanto, apenas um placeholder
+        QMessageBox.information(None, "Diário de Sintomas",
+                                f"Entrada de sintoma para paciente {patient_id} registrada: {entry}")
+
+
+class DoctorService:
+    def __init__(self, db):
+        self.db = db
+
+    def create_doctor(self, user: User, doctor: Doctor) -> int:
+        """Cria um novo médico no sistema"""
+        user_id = self.db.register_user(user)
+        doctor.user_id = user_id
+        self.db.save_doctor(doctor)
+        return user_id
+
+    def get_doctor(self, user_id: int) -> Optional[Doctor]:
+        """Busca um médico pelo ID do usuário"""
+        return self.db.get_doctor(user_id)
+
+    def list_all_doctors(self) -> List[Doctor]:
+        """Lista todos os médicos"""
+        return self.db.list_doctors()
+
+
+class AppointmentService:
+    def __init__(self, db):
+        self.db = db
+
+    def create_appointment(self, appointment: Appointment) -> int:
+        """Cria uma nova consulta"""
+        return self.db.save_appointment(appointment)
+
+    def get_appointments_for_patient(self, patient_id: int) -> List[Appointment]:
+        """Busca consultas de um paciente"""
+        return self.db.get_appointments_by_patient(patient_id)
+
+    def get_appointments_for_doctor(self, doctor_id: int) -> List[Appointment]:
+        """Busca consultas de um médico"""
+        return self.db.get_appointments_by_doctor(doctor_id)
+
+    def update_appointment(self, appointment: Appointment):
+        """Atualiza uma consulta"""
+        self.db.update_appointment(appointment)
+
+    def cancel_appointment(self, appointment_id: int):
+        """Cancela uma consulta"""
+        appointment = self.db.get_appointment(appointment_id)
+        if appointment:
+            appointment.status = AppointmentStatus.CANCELLED
+            self.db.update_appointment(appointment)
+
+
+class PharmacyService:
+    def __init__(self, db):
+        self.db = db
+
+    def get_medication(self, medication_id: int) -> Optional[Medication]:
+        """Busca um medicamento pelo ID"""
+        return self.db.get_medication(medication_id)
+
+    def list_medications(self) -> List[Medication]:
+        """Lista todos os medicamentos"""
+        return self.db.list_medications()
+
+    def update_stock(self, medication_id: int, quantity_used: int):
+        """Atualiza o estoque de um medicamento"""
+        medication = self.get_medication(medication_id)
+        if medication:
+            medication.stock_quantity -= quantity_used
+            if medication.stock_quantity <= 0:
+                medication.status = MedicationStatus.OUT_OF_STOCK
+            elif medication.stock_quantity <= medication.min_stock:
+                medication.status = MedicationStatus.LOW_STOCK
+            else:
+                medication.status = MedicationStatus.AVAILABLE
+            self.db.update_medication(medication)
+
+    def add_medication(self, medication: Medication) -> int:
+        """Adiciona um novo medicamento"""
+        return self.db.save_medication(medication)
+
+
+class PrescriptionService:
+    def __init__(self, db, pharmacy_service):
+        self.db = db
+        self.pharmacy_service = pharmacy_service
+
+    def create_prescription(self, prescription: Prescription) -> int:
+        """Cria uma nova prescrição"""
+        prescription_id = self.db.save_prescription(prescription)
+
+        # Se for prescrição hospitalar, atualiza o estoque
+        if prescription.prescription_type == PrescriptionType.HOSPITAL:
+            self.pharmacy_service.update_stock(prescription.medication_id, prescription.quantity)
+
+        return prescription_id
+
+    def get_prescriptions_for_patient(self, patient_id: int) -> List[Prescription]:
+        """Busca prescrições de um paciente"""
+        return self.db.get_prescriptions_by_patient(patient_id)
+
+    def get_prescriptions_for_doctor(self, doctor_id: int) -> List[Prescription]:
+        """Busca prescrições de um médico"""
+        return self.db.get_prescriptions_by_doctor(doctor_id)
+
+
+# --------------------------- DATA ACCESS LAYER (OO) ---------------------------
+
+class DB:
+    def __init__(self, path=DB_FILE):
+        self.path = path
+        self.ensure()
+
+    def connect(self):
+        return sqlite3.connect(self.path)
+
+    def ensure(self):
+        con = self.connect();
+        cur = con.cursor()
+
+        # Tabela de usuários (atualizada com two_factor_secret)
+        cur.execute("""CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT NOT NULL CHECK(role IN ('patient','doctor')),
+            username TEXT,
+            doctor_login TEXT,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            two_factor_secret TEXT
+        )""")
+        # Adicionar coluna two_factor_secret se não existir
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN two_factor_secret TEXT")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+
+        # Tabela de pacientes (atualizada com symptom_diary)
+        cur.execute("""CREATE TABLE IF NOT EXISTS patients(
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT NOT NULL,
+            cpf TEXT NOT NULL UNIQUE,
+            birthdate TEXT NOT NULL,
+            age INTEGER NOT NULL,
+            blood_type TEXT,
+            family_history TEXT,
+            allergies TEXT,
+            surgeries_history TEXT,
+            other_info TEXT,
+            symptom_diary TEXT
+        )""")
+        # Adicionar coluna symptom_diary se não existir
+        try:
+            cur.execute("ALTER TABLE patients ADD COLUMN symptom_diary TEXT")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+
+        # Tabela de médicos
+        cur.execute("""CREATE TABLE IF NOT EXISTS doctors(
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT NOT NULL,
+            doctor_login TEXT NOT NULL UNIQUE,
+            specialty TEXT,
+            crm TEXT
+        )""")
+
+        # Tabela de consultas (com anamnese)
+        cur.execute("""CREATE TABLE IF NOT EXISTS appointments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            doctor_id INTEGER NOT NULL,
+            date_time TEXT NOT NULL,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'marcada',
+            notes TEXT,
+            anamnesis TEXT
+        )""")
+
+        # Tabela de mensagens
+        cur.execute("""CREATE TABLE IF NOT EXISTS messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user INTEGER NOT NULL,
+            to_user INTEGER NOT NULL,
+            sent_at TEXT NOT NULL,
+            body TEXT NOT NULL
+        )""")
+
+        # Tabela de resultados de exames
+        cur.execute("""CREATE TABLE IF NOT EXISTS exam_results(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            doctor_id INTEGER,
+            exam_type TEXT NOT NULL,
+            value REAL NOT NULL,
+            unit TEXT,
+            taken_at TEXT NOT NULL,
+            notes TEXT
+        )""")
+
+        # Tabela de arquivos de exames (atualizada com document_type)
+        cur.execute("""CREATE TABLE IF NOT EXISTS exam_files(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            doctor_id INTEGER,
+            exam_type TEXT,
+            file_path TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            document_type TEXT NOT NULL DEFAULT 'Exame'
+        )""")
+        # Adicionar coluna document_type se não existir
+        try:
+            cur.execute("ALTER TABLE exam_files ADD COLUMN document_type TEXT DEFAULT 'Exame'")
+        except sqlite3.OperationalError:
+            pass  # Coluna já existe
+
+        # Tabela de medicamentos
+        cur.execute("""CREATE TABLE IF NOT EXISTS medications(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            unit TEXT,
+            stock_quantity INTEGER NOT NULL DEFAULT 0,
+            min_stock INTEGER NOT NULL DEFAULT 10,
+            status TEXT NOT NULL DEFAULT 'disponivel'
+        )""")
+
+        # Tabela de prescrições (atualizada)
+        cur.execute("""CREATE TABLE IF NOT EXISTS prescriptions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            doctor_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            medication_id INTEGER NOT NULL,
+            medication_name TEXT NOT NULL,
+            dosage TEXT,
+            instructions TEXT,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            prescription_type TEXT NOT NULL DEFAULT 'receituario'
+        )""")
+
+        # Tabela de notas
+        cur.execute("""CREATE TABLE IF NOT EXISTS notes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doctor_id INTEGER NOT NULL,
+            patient_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            content TEXT NOT NULL
+        )""")
+
+        # Tabela de configurações (atualizada com language e accessibility_mode)
+        cur.execute("""CREATE TABLE IF NOT EXISTS settings(
+            user_id INTEGER PRIMARY KEY,
+            theme TEXT NOT NULL DEFAULT 'dark',
+            language TEXT NOT NULL DEFAULT 'pt_BR',
+            accessibility_mode BOOLEAN NOT NULL DEFAULT 0
+        )""")
+        # Adicionar colunas language e accessibility_mode se não existirem
+        try:
+            cur.execute("ALTER TABLE settings ADD COLUMN language TEXT DEFAULT 'pt_BR'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cur.execute("ALTER TABLE settings ADD COLUMN accessibility_mode BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        # Inserir medicamentos padrão se não existirem
+        cur.execute("SELECT COUNT(*) FROM medications")
+        if cur.fetchone()[0] == 0:
+            default_medications = [
+                ("Paracetamol 500mg", "Analgésico e antipirético", "comprimido", 100, 10),
+                ("Ibuprofeno 600mg", "Anti-inflamatório", "comprimido", 80, 10),
+                ("Amoxicilina 500mg", "Antibiótico", "cápsula", 50, 5),
+                ("Dipirona 500mg", "Analgésico e antipirético", "comprimido", 120, 15),
+                ("Omeprazol 20mg", "Protetor gástrico", "cápsula", 60, 8),
+                ("Losartana 50mg", "Anti-hipertensivo", "comprimido", 90, 12),
+                ("Metformina 850mg", "Antidiabético", "comprimido", 70, 10),
+                ("Sinvastatina 20mg", "Redutor de colesterol", "comprimido", 40, 5),
+            ]
+            for name, desc, unit, stock, min_stock in default_medications:
+                cur.execute("""INSERT INTO medications(name, description, unit, stock_quantity, min_stock, status)
+                               VALUES(?, ?, ?, ?, ?, 'disponivel')""", (name, desc, unit, stock, min_stock))
+
+        con.commit();
+        con.close()
+
+    # ---------- User Management ----------
+    def register_user(self, user: User) -> int:
+        con = self.connect();
+        cur = con.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO users(role,username,doctor_login,password_hash,created_at,two_factor_secret) VALUES(?,?,?,?,?,?)",
+                (user.role.value, user.username, user.doctor_login, user.password_hash, user.created_at,
+                 user.two_factor_secret))
+            user_id = cur.lastrowid
+            con.commit()
+            return user_id
+        except sqlite3.IntegrityError as e:
+            con.rollback()
+            raise e
+        finally:
+            con.close()
+
+    def get_user_by_username(self, username: str, role: UserRole) -> Optional[User]:
+        con = self.connect();
+        cur = con.cursor()
+        if role == UserRole.PATIENT:
+            cur.execute(
+                "SELECT id, role, username, doctor_login, password_hash, created_at, two_factor_secret FROM users WHERE role='patient' AND username=?",
+                (username,))
+        else:  # Doctor
+            cur.execute(
+                "SELECT id, role, username, doctor_login, password_hash, created_at, two_factor_secret FROM users WHERE role='doctor' AND doctor_login=?",
+                (username,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            return User(id=r[0], role=UserRole(r[1]), username=r[2], doctor_login=r[3], password_hash=r[4],
+                        created_at=r[5], two_factor_secret=r[6])
+        return None
+
+    def login_patient(self, username: str, password: str) -> Optional[int]:
+        user = self.get_user_by_username(username, UserRole.PATIENT)
+        if user and user.password_hash == sha256(password):
+            return user.id
+        return None
+
+    def login_doctor(self, doctor_login: str, password: str) -> Optional[int]:
+        user = self.get_user_by_username(doctor_login, UserRole.DOCTOR)
+        if user and user.password_hash == sha256(password):
+            return user.id
+        return None
+
+    # Novo: Atualizar 2FA secret
+    def update_two_factor_secret(self, user_id: int, secret: str):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("UPDATE users SET two_factor_secret=? WHERE id=?", (secret, user_id))
+        con.commit();
+        con.close()
+
+    # ---------- Patient Management ----------
+    def save_patient(self, patient: Patient):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO patients(user_id,full_name,cpf,birthdate,age,blood_type,family_history,allergies,surgeries_history,other_info,symptom_diary)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (patient.user_id, patient.full_name, patient.cpf, patient.birthdate, patient.age,
+                     patient.blood_type, patient.family_history, patient.allergies, patient.surgeries_history,
+                     patient.other_info, patient.symptom_diary))
+        con.commit();
+        con.close()
+
+    def get_patient(self, user_id: int) -> Optional[Patient]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT user_id, full_name, cpf, birthdate, age, blood_type, family_history, allergies, surgeries_history, other_info, symptom_diary
+                       FROM patients WHERE user_id=?""", (user_id,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            return Patient(*r)
+        return None
+
+    def update_patient(self, patient: Patient):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""UPDATE patients SET full_name=?, cpf=?, birthdate=?, age=?, blood_type=?,
+                       family_history=?, allergies=?, surgeries_history=?, other_info=?, symptom_diary=? WHERE user_id=?""",
+                    (patient.full_name, patient.cpf, patient.birthdate, patient.age, patient.blood_type,
+                     patient.family_history, patient.allergies, patient.surgeries_history, patient.other_info,
+                     patient.symptom_diary, patient.user_id))
+        con.commit();
+        con.close()
+
+    def list_patients(self) -> List[Patient]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT user_id, full_name, cpf, birthdate, age, blood_type, family_history, allergies, surgeries_history, other_info, symptom_diary
+                       FROM patients ORDER BY full_name""")
+        rows = cur.fetchall();
+        con.close()
+        return [Patient(*row) for row in rows]
+
+    # ---------- Doctor Management ----------
+    def save_doctor(self, doctor: Doctor):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("INSERT INTO doctors(user_id,full_name,doctor_login,specialty,crm) VALUES(?,?,?,?,?)",
+                    (doctor.user_id, doctor.full_name, doctor.doctor_login, doctor.specialty, doctor.crm))
+        con.commit();
+        con.close()
+
+    def get_doctor(self, user_id: int) -> Optional[Doctor]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("SELECT user_id, full_name, doctor_login, specialty, crm FROM doctors WHERE user_id=?", (user_id,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            return Doctor(*r)
+        return None
+
+    def list_doctors(self) -> List[Doctor]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("SELECT user_id, full_name, doctor_login, specialty, crm FROM doctors ORDER BY full_name")
+        rows = cur.fetchall();
+        con.close()
+        return [Doctor(*row) for row in rows]
+
+    # ---------- Appointment Management ----------
+    def save_appointment(self, appointment: Appointment) -> int:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO appointments(patient_id,doctor_id,date_time,reason,status,notes,anamnesis)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (appointment.patient_id, appointment.doctor_id, appointment.date_time, appointment.reason,
+                     appointment.status.value, appointment.notes, appointment.anamnesis))
+        appointment_id = cur.lastrowid
+        con.commit();
+        con.close()
+        return appointment_id
+
+    def get_appointment(self, appointment_id: int) -> Optional[Appointment]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, patient_id, doctor_id, date_time, reason, status, notes, anamnesis
+                       FROM appointments WHERE id=?""", (appointment_id,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            appointment = Appointment(*r)
+            appointment.status = AppointmentStatus(appointment.status)
+            return appointment
+        return None
+
+    def update_appointment(self, appointment: Appointment):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""UPDATE appointments SET patient_id=?, doctor_id=?, date_time=?, reason=?, status=?, notes=?, anamnesis=?
+                       WHERE id=?""",
+                    (appointment.patient_id, appointment.doctor_id, appointment.date_time, appointment.reason,
+                     appointment.status.value, appointment.notes, appointment.anamnesis, appointment.id))
+        con.commit();
+        con.close()
+
+    def get_appointments_by_patient(self, patient_id: int) -> List[Appointment]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, patient_id, doctor_id, date_time, reason, status, notes, anamnesis
+                       FROM appointments WHERE patient_id=? ORDER BY date_time DESC""", (patient_id,))
+        rows = cur.fetchall();
+        con.close()
+        appointments = []
+        for row in rows:
+            appointment = Appointment(*row)
+            appointment.status = AppointmentStatus(appointment.status)
+            appointments.append(appointment)
+        return appointments
+
+    def get_appointments_by_doctor(self, doctor_id: int) -> List[Appointment]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, patient_id, doctor_id, date_time, reason, status, notes, anamnesis
+                       FROM appointments WHERE doctor_id=? ORDER BY date_time DESC""", (doctor_id,))
+        rows = cur.fetchall();
+        con.close()
+        appointments = []
+        for row in rows:
+            appointment = Appointment(*row)
+            appointment.status = AppointmentStatus(appointment.status)
+            appointments.append(appointment)
+        return appointments
+
+    # ---------- Medication Management ----------
+    def save_medication(self, medication: Medication) -> int:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO medications(name,description,unit,stock_quantity,min_stock,status)
+                       VALUES(?,?,?,?,?,?)""",
+                    (medication.name, medication.description, medication.unit, medication.stock_quantity,
+                     medication.min_stock, medication.status.value))
+        medication_id = cur.lastrowid
+        con.commit();
+        con.close()
+        return medication_id
+
+    def get_medication(self, medication_id: int) -> Optional[Medication]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, name, description, unit, stock_quantity, min_stock, status
+                       FROM medications WHERE id=?""", (medication_id,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            medication = Medication(*r)
+            medication.status = MedicationStatus(medication.status)
+            return medication
+        return None
+
+    def update_medication(self, medication: Medication):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""UPDATE medications SET name=?, description=?, unit=?, stock_quantity=?, min_stock=?, status=?
+                       WHERE id=?""",
+                    (medication.name, medication.description, medication.unit, medication.stock_quantity,
+                     medication.min_stock, medication.status.value, medication.id))
+        con.commit();
+        con.close()
+
+    def list_medications(self) -> List[Medication]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, name, description, unit, stock_quantity, min_stock, status
+                       FROM medications ORDER BY name""")
+        rows = cur.fetchall();
+        con.close()
+        medications = []
+        for row in rows:
+            medication = Medication(*row)
+            medication.status = MedicationStatus(medication.status)
+            medications.append(medication)
+        return medications
+
+    # ---------- Prescription Management ----------
+    def save_prescription(self, prescription: Prescription) -> int:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO prescriptions(patient_id,doctor_id,created_at,medication_id,medication_name,dosage,instructions,quantity,prescription_type)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (prescription.patient_id, prescription.doctor_id, prescription.created_at,
+                     prescription.medication_id,
+                     prescription.medication_name, prescription.dosage, prescription.instructions,
+                     prescription.quantity,
+                     prescription.prescription_type.value))
+        prescription_id = cur.lastrowid
+        con.commit();
+        con.close()
+        return prescription_id
+
+    def get_prescriptions_by_patient(self, patient_id: int) -> List[Prescription]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, patient_id, doctor_id, created_at, medication_id, medication_name, dosage, instructions, quantity, prescription_type
+                       FROM prescriptions WHERE patient_id=? ORDER BY created_at DESC""", (patient_id,))
+        rows = cur.fetchall();
+        con.close()
+        prescriptions = []
+        for row in rows:
+            prescription = Prescription(*row)
+            prescription.prescription_type = PrescriptionType(prescription.prescription_type)
+            prescriptions.append(prescription)
+        return prescriptions
+
+    def get_prescriptions_by_doctor(self, doctor_id: int) -> List[Prescription]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id, patient_id, doctor_id, created_at, medication_id, medication_name, dosage, instructions, quantity, prescription_type
+                       FROM prescriptions WHERE doctor_id=? ORDER BY created_at DESC""", (doctor_id,))
+        rows = cur.fetchall();
+        con.close()
+        prescriptions = []
+        for row in rows:
+            prescription = Prescription(*row)
+            prescription.prescription_type = PrescriptionType(prescription.prescription_type)
+            prescriptions.append(prescription)
+        return prescriptions
+
+    # ---------- Settings ----------
+    def get_settings(self, user_id: int) -> Settings:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("SELECT user_id, theme, language, accessibility_mode FROM settings WHERE user_id=?", (user_id,))
+        r = cur.fetchone();
+        con.close()
+        if r:
+            return Settings(user_id=r[0], theme=r[1], language=r[2], accessibility_mode=bool(r[3]))
+        return Settings(user_id=user_id)  # Default settings
+
+    def set_settings(self, settings: Settings):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO settings(user_id,theme,language,accessibility_mode) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET theme=excluded.theme, language=excluded.language, accessibility_mode=excluded.accessibility_mode",
+            (settings.user_id, settings.theme, settings.language, int(settings.accessibility_mode)))
+        con.commit();
+        con.close()
+
+    # ---------- Messages ----------
+    def send_message(self, from_user: int, to_user: int, body: str):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO messages(from_user,to_user,sent_at,body)
+                       VALUES(?,?,?,?)""", (from_user, to_user, datetime.now().isoformat(timespec='minutes'), body))
+        con.commit();
+        con.close()
+
+    def conversation(self, a: int, b: int, limit: int = 500) -> List[tuple]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT from_user,to_user,sent_at,body FROM messages
+                       WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
+                       ORDER BY sent_at DESC LIMIT ?""", (a, b, b, a, limit))
+        r = cur.fetchall();
+        con.close()
+        return list(reversed(r))
+
+    # ---------- Exam Results ----------
+    def add_exam_result(self, patient_id: int, doctor_id: int, exam_type: str, value: float, unit: str,
+                        taken_at_iso: str, notes: str):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO exam_results(patient_id,doctor_id,exam_type,value,unit,taken_at,notes)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (patient_id, doctor_id, exam_type, value, unit, taken_at_iso, notes))
+        con.commit();
+        con.close()
+
+    def list_exam_results(self, patient_id: int, exam_type: str = None) -> List[tuple]:
+        con = self.connect();
+        cur = con.cursor()
+        if exam_type:
+            cur.execute("""SELECT exam_type,value,unit,taken_at,notes,doctor_id,id
+                           FROM exam_results WHERE patient_id=? AND exam_type=?
+                           ORDER BY taken_at ASC""", (patient_id, exam_type))
+        else:
+            cur.execute("""SELECT exam_type,value,unit,taken_at,notes,doctor_id,id
+                           FROM exam_results WHERE patient_id=?
+                           ORDER BY taken_at DESC""", (patient_id,))
+        r = cur.fetchall();
+        con.close()
+        return r
+
+    def add_exam_file(self, patient_id: int, doctor_id: int, exam_type: str, file_path: str,
+                      document_type: str = "Exame"):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO exam_files(patient_id,doctor_id,exam_type,file_path,uploaded_at,document_type)
+                       VALUES(?,?,?,?,?,?)""",
+                    (patient_id, doctor_id, exam_type, file_path, datetime.now().isoformat(timespec='minutes'),
+                     document_type))
+        con.commit();
+        con.close()
+
+    def list_exam_files(self, patient_id: int) -> List[tuple]:
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""SELECT id,exam_type,file_path,uploaded_at,doctor_id,document_type
+                       FROM exam_files WHERE patient_id=?
+                       ORDER BY uploaded_at DESC""", (patient_id,))
+        r = cur.fetchall();
+        con.close()
+        return r
+
+    # ---------- Notes ----------
+    def add_note(self, doctor_id: int, patient_id: int, content: str):
+        con = self.connect();
+        cur = con.cursor()
+        cur.execute("""INSERT INTO notes(doctor_id,patient_id,created_at,content)
+                       VALUES(?,?,?,?)""",
+                    (doctor_id, patient_id, datetime.now().isoformat(timespec='minutes'), content))
+        con.commit();
+        con.close()
+
+    def list_notes(self, doctor_id: int, patient_id: int = None) -> List[tuple]:
+        con = self.connect();
+        cur = con.cursor()
+        if patient_id:
+            cur.execute("""SELECT id,created_at,content,patient_id FROM notes
+                           WHERE doctor_id=? AND patient_id=? ORDER BY created_at DESC""", (doctor_id, patient_id))
+        else:
+            cur.execute("""SELECT id,created_at,content,patient_id FROM notes
+                           WHERE doctor_id=? ORDER BY created_at DESC""", (doctor_id,))
+        r = cur.fetchall();
+        con.close()
+        return r
+
+
+# --------------------------- PLOT CANVAS ---------------------------
+
+class PlotCanvas(FigureCanvas):
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        super().__init__(self.fig)
+        self.setParent(parent)
+
+    def plot_exam_series(self, series, exam_type, age):
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        if not series:
+            ax.text(0.5, 0.5, "Sem dados", ha='center', va='center', transform=ax.transAxes)
+            self.draw()
+            return
+
+        dates = [datetime.fromisoformat(dt) for dt, val in series]
+        values = [val for dt, val in series]
+        ax.plot(dates, values, 'o-', linewidth=2, markersize=6)
+        ax.set_title(f"{exam_type} — Evolução")
+        ax.set_ylabel("Valor")
+        ax.grid(True, alpha=0.3)
+
+        # Faixa de referência
+        ref = ref_range_for_age(exam_type, age)
+        if ref:
+            lo, hi = ref
+            ax.axhspan(lo, hi, alpha=0.2, color='green', label=f"Normal ({lo}-{hi})")
+            ax.legend()
+
+        self.fig.tight_layout()
+        self.draw()
+
+
+# --------------------------- DIALOGS ---------------------------
+
+class RegisterDialog(QDialog):
+    def __init__(self, db: DB, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Cadastro")
+        self.resize(600, 700)
+
+        v = QVBoxLayout(self)
+        self.role = QComboBox();
+        self.role.addItems(["Paciente", "Médico"])
+        self.role.currentTextChanged.connect(self._toggle_form)
+        v.addWidget(QLabel("Tipo:"));
+        v.addWidget(self.role)
+
+        self.stack = QStackedWidget()
+        v.addWidget(self.stack)
+
+        # Form Paciente
+        p_widget = QWidget()
+        pg = QGridLayout(p_widget)
+        self.p_user = QLineEdit();
+        self.p_user.setPlaceholderText("Nome de usuário")
+        self.p_pass = QLineEdit();
+        self.p_pass.setEchoMode(QLineEdit.Password)
+        self.p_pass.setPlaceholderText("Senha")
+        self.p_full = QLineEdit();
+        self.p_full.setPlaceholderText("Nome completo")
+        self.p_cpf = QLineEdit();
+        self.p_cpf.setPlaceholderText("CPF")
+        self.p_birth = QDateEdit(calendarPopup=True);
+        self.p_birth.setDate(QDate.currentDate().addYears(-30))
+        self.p_blood = QComboBox();
+        self.p_blood.addItems(['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'])
+        self.p_fam = QTextEdit();
+        self.p_fam.setMaximumHeight(80);
+        self.p_fam.setPlaceholderText("Histórico familiar")
+        self.p_all = QTextEdit();
+        self.p_all.setMaximumHeight(80);
+        self.p_all.setPlaceholderText("Alergias")
+        self.p_surg = QTextEdit();
+        self.p_surg.setMaximumHeight(80);
+        self.p_surg.setPlaceholderText("Histórico de cirurgias")
+        self.p_other = QTextEdit();
+        self.p_other.setMaximumHeight(80);
+        self.p_other.setPlaceholderText("Outras informações")
+
+        pg.addWidget(QLabel("Usuário"), 0, 0);
+        pg.addWidget(self.p_user, 0, 1)
+        pg.addWidget(QLabel("Senha"), 1, 0);
+        pg.addWidget(self.p_pass, 1, 1)
+        pg.addWidget(QLabel("Nome completo"), 2, 0);
+        pg.addWidget(self.p_full, 2, 1)
+        pg.addWidget(QLabel("CPF"), 3, 0);
+        pg.addWidget(self.p_cpf, 3, 1)
+        pg.addWidget(QLabel("Nascimento"), 4, 0);
+        pg.addWidget(self.p_birth, 4, 1)
+        pg.addWidget(QLabel("Tipo sanguíneo"), 5, 0);
+        pg.addWidget(self.p_blood, 5, 1)
+        pg.addWidget(QLabel("Histórico familiar"), 6, 0);
+        pg.addWidget(self.p_fam, 6, 1)
+        pg.addWidget(QLabel("Alergias"), 7, 0);
+        pg.addWidget(self.p_all, 7, 1)
+        pg.addWidget(QLabel("Cirurgias"), 8, 0);
+        pg.addWidget(self.p_surg, 8, 1)
+        pg.addWidget(QLabel("Outras informações"), 9, 0);
+        pg.addWidget(self.p_other, 9, 1)
+        self.stack.addWidget(p_widget)
+
+        # Form Médico
+        d_widget = QWidget()
+        dg = QGridLayout(d_widget)
+        self.d_id = QLineEdit();
+        self.d_id.setPlaceholderText("ID de login do médico")
+        self.d_pass = QLineEdit();
+        self.d_pass.setEchoMode(QLineEdit.Password)
+        self.d_pass.setPlaceholderText("Senha")
+        self.d_full = QLineEdit();
+        self.d_full.setPlaceholderText("Nome completo")
+        self.d_spec = QLineEdit();
+        self.d_spec.setPlaceholderText("Especialidade")
+        self.d_crm = QLineEdit();
+        self.d_crm.setPlaceholderText("CRM")
+        dg.addWidget(QLabel("ID Médico"), 0, 0);
+        dg.addWidget(self.d_id, 0, 1)
+        dg.addWidget(QLabel("Senha"), 1, 0);
+        dg.addWidget(self.d_pass, 1, 1)
+        dg.addWidget(QLabel("Nome completo"), 2, 0);
+        dg.addWidget(self.d_full, 2, 1)
+        dg.addWidget(QLabel("Especialidade"), 3, 0);
+        dg.addWidget(self.d_spec, 3, 1)
+        dg.addWidget(QLabel("CRM"), 4, 0);
+        dg.addWidget(self.d_crm, 4, 1)
+        self.stack.addWidget(d_widget)
+
+        btns = QHBoxLayout()
+        ok = QPushButton("Criar");
+        ok.setProperty("accent", True);
+        ok.clicked.connect(self.on_create)
+        cancel = QPushButton("Cancelar");
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok);
+        btns.addWidget(cancel);
+        btns.addStretch(1)
+        v.addLayout(btns)
+
+    def _toggle_form(self):
+        self.stack.setCurrentIndex(0 if self.role.currentText() == "Paciente" else 1)
+
+    def on_create(self):
+        try:
+            if self.role.currentText() == "Paciente":
+                user = User(
+                    role=UserRole.PATIENT,
+                    username=self.p_user.text().strip(),
+                    password_hash=sha256(self.p_pass.text()),
+                    created_at=datetime.now().isoformat()
+                )
+                patient = Patient(
+                    user_id=0,  # será definido pelo serviço
+                    full_name=self.p_full.text().strip(),
+                    cpf=self.p_cpf.text().strip(),
+                    birthdate=self.p_birth.date().toPyDate().isoformat(),
+                    age=calc_age(self.p_birth.date().toPyDate().isoformat()),
+                    blood_type=self.p_blood.currentText(),
+                    family_history=self.p_fam.toPlainText(),
+                    allergies=self.p_all.toPlainText(),
+                    surgeries_history=self.p_surg.toPlainText(),
+                    other_info=self.p_other.toPlainText()
+                )
+                patient_service = PatientService(self.db)
+                patient_service.create_patient(user, patient)
+                QMessageBox.information(self, "Sucesso", "Paciente cadastrado!")
+                self.accept()
+            else:
+                user = User(
+                    role=UserRole.DOCTOR,
+                    doctor_login=self.d_id.text().strip(),
+                    password_hash=sha256(self.d_pass.text()),
+                    created_at=datetime.now().isoformat()
+                )
+                doctor = Doctor(
+                    user_id=0,  # será definido pelo serviço
+                    full_name=self.d_full.text().strip(),
+                    doctor_login=self.d_id.text().strip(),
+                    specialty=self.d_spec.text().strip(),
+                    crm=self.d_crm.text().strip()
+                )
+                doctor_service = DoctorService(self.db)
+                doctor_service.create_doctor(user, doctor)
+                QMessageBox.information(self, "Sucesso", "Médico cadastrado!")
+                self.accept()
+        except sqlite3.IntegrityError as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao cadastrar (duplicado?): {e}")
+
+
+class LoginWindow(QWidget):
+    def __init__(self, db: DB):
+        super().__init__()
+        self.db = db
+        self.setWindowTitle(f"{APP_NAME} — Login")
+        self.resize(scaled_value(980), scaled_value(600))
+
+        # Layout geral
+        root = QHBoxLayout(self);
+        root.setContentsMargins(16, 16, 16, 16);
+        root.setSpacing(16)
+
+        # Banner
+        banner = QFrame();
+        banner.setObjectName("card");
+        bl = QVBoxLayout(banner)
+        title = QLabel(f"<h2>{APP_NAME}</h2>")
+        subtitle = QLabel("Sistema de prontuário clínico moderno com OO");
+        subtitle.setProperty("muted", True)
+        bl.addWidget(title);
+        bl.addWidget(subtitle);
+        bl.addStretch(1)
+        root.addWidget(banner, 2)
+
+        # Form
+        form_card = QFrame();
+        form_card.setObjectName("card")
+        fl = QVBoxLayout(form_card);
+        fl.setContentsMargins(20, 20, 20, 20)
+
+        self.role_combo = QComboBox();
+        self.role_combo.addItems(["Paciente", "Médico"])
+        row_role = QHBoxLayout();
+        row_role.addWidget(QLabel("Entrar como:"));
+        row_role.addWidget(self.role_combo);
+        row_role.addStretch(1)
+        fl.addLayout(row_role)
+
+        grid = QGridLayout();
+        grid.setSpacing(8)
+        self.le_user = QLineEdit();
+        self.le_user.setPlaceholderText("Usuário (paciente) ou ID (médico)")
+        self.le_pass = QLineEdit();
+        self.le_pass.setEchoMode(QLineEdit.Password);
+        self.le_pass.setPlaceholderText("Senha")
+        grid.addWidget(QLabel("Usuário/ID"), 0, 0);
+        grid.addWidget(self.le_user, 0, 1)
+        grid.addWidget(QLabel("Senha"), 1, 0);
+        grid.addWidget(self.le_pass, 1, 1)
+        fl.addLayout(grid)
+
+        btn_row = QHBoxLayout()
+        btn_login = QPushButton("Entrar");
+        btn_login.clicked.connect(self.on_login)
+        btn_register = QPushButton("Cadastrar");
+        btn_register.setProperty("accent", True);
+        btn_register.clicked.connect(self.on_register)
+        btn_row.addWidget(btn_login);
+        btn_row.addWidget(btn_register);
+        btn_row.addStretch(1)
+        fl.addLayout(btn_row)
+
+        fl.addStretch(1)
+        root.addWidget(form_card, 3)
+
+        # Tema inicial (escuro por padrão)
+        self.apply_theme('dark')
+
+    def apply_theme(self, theme):
+        if theme == 'light':
+            self.setStyleSheet(scale_qss(QSS_LIGHT_TEMPLATE))
+        elif theme == 'high_contrast':
+            self.setStyleSheet(scale_qss(QSS_HIGH_CONTRAST_TEMPLATE))
+        else:
+            self.setStyleSheet(scale_qss(QSS_DARK_TEMPLATE))
+
+
+    def on_register(self):
+        dlg = RegisterDialog(self.db, self)
+        dlg.exec_()
+
+    def on_login(self):
+        ident = self.le_user.text().strip()
+        pwd = self.le_pass.text()
+        user_role = UserRole.PATIENT if self.role_combo.currentText() == "Paciente" else UserRole.DOCTOR
+
+        user = self.db.get_user_by_username(ident, user_role)
+
+        if user and user.password_hash == sha256(pwd):
+            # Verificar 2FA se estiver configurado
+            if user.two_factor_secret:
+                # Placeholder para verificação 2FA
+                # Em um sistema real, você usaria uma biblioteca como `pyotp`
+                # para gerar e verificar códigos TOTP.
+                # Por simplicidade, aqui apenas pedimos um código e o "validamos"
+                # Se o segredo for "123456", qualquer código é aceito.
+                # Caso contrário, o código deve ser "000000" para passar.
+                code, ok = QInputDialog.getText(self, "Verificação 2FA", "Insira o código 2FA:")
+                if not ok or not code:
+                    QMessageBox.warning(self, "Login", "Verificação 2FA cancelada.")
+                    return
+
+                # Lógica de validação 2FA (simplificada para demonstração)
+                if user.two_factor_secret == "123456" or code == "000000":  # Exemplo de validação
+                    QMessageBox.information(self, "Login", "Código 2FA validado (DEMO).")
+                else:
+                    QMessageBox.warning(self, "Erro", "Código 2FA inválido.")
+                    return
+
+            settings = self.db.get_settings(user.id)
+            if user_role == UserRole.PATIENT:
+                self.main = PatientWindow(self.db, user.id)
+            else:
+                self.main = DoctorWindow(self.db, user.id)
+            self.main.apply_theme(settings.theme)
+            self.main.show()
+            self.close()
+        else:
+            QMessageBox.warning(self, "Erro", "Usuário/ID ou senha inválidos.")
+
+
+# --------------------------- PACIENTE (TABS) ---------------------------
+
+class PatientWindow(QMainWindow):
+    def apply_theme(self, theme):
+        if theme == 'light':
+            self.setStyleSheet(scale_qss(QSS_LIGHT_TEMPLATE))
+        elif theme == 'high_contrast':
+            self.setStyleSheet(scale_qss(QSS_HIGH_CONTRAST_TEMPLATE))
+        else:
+            self.setStyleSheet(scale_qss(QSS_DARK_TEMPLATE))
+        settings = self.db.get_settings(self.user_id)
+        settings.theme = theme
+        self.db.set_settings(settings)
+
+    def __init__(self, db: DB, user_id: int):
+
+
+
+        super().__init__()
+        self.db = db
+        self.user_id = user_id
+        self.setWindowTitle("Paciente — Prontuário")
+        self.resize(scaled_value(1200), scaled_value(780))
+
+        # Inicializar serviços
+        self.patient_service = PatientService(self.db)
+        self.appointment_service = AppointmentService(self.db)
+        self.pharmacy_service = PharmacyService(self.db)
+        self.prescription_service = PrescriptionService(self.db, self.pharmacy_service)
+
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        self.tab_dashboard = QWidget()
+        self.tab_anamnese = QWidget()
+        self.tab_mensagens = QWidget()
+        self.tab_exames = QWidget()
+        self.tab_historico = QWidget()
+        self.tab_prescricoes = QWidget()
+        self.tab_perfil = QWidget()
+        self.tab_relatorios = QWidget()
+        self.tab_symptom_diary = QWidget()  # Novo: Diário de Sintomas
+        self.tab_education = QWidget()  # Novo: Educação em Saúde
+
+        # Ícones
+        self.tabs.addTab(self.tab_dashboard, icon("fa.home", "#10b981"), "Dashboard")
+        self.tabs.addTab(self.tab_anamnese, icon("fa.calendar", "#60a5fa"), "Anamnese")
+        self.tabs.addTab(self.tab_mensagens, icon("fa.comments", "#f59e0b"), "Mensagens")
+        self.tabs.addTab(self.tab_exames, icon("fa.line-chart", "#f87171"), "Exames")
+        self.tabs.addTab(self.tab_historico, icon("fa.history", "#a78bfa"), "Histórico")
+        self.tabs.addTab(self.tab_prescricoes, icon("fa.sticky-note", "#34d399"), "Prescrições")
+        self.tabs.addTab(self.tab_symptom_diary, icon("fa.book", "#8b5cf6"), "Diário de Sintomas")  # Novo
+        self.tabs.addTab(self.tab_education, icon("fa.graduation-cap", "#06b6d4"), "Educação em Saúde")  # Novo
+        self.tabs.addTab(self.tab_perfil, icon("fa.user", "#93c5fd"), "Perfil")
+        self.tabs.addTab(self.tab_relatorios, icon("fa.file-pdf-o", "#ef4444"), "Relatórios")
+
+        self._build_dashboard()
+        self._build_anamnese()
+        self._build_mensagens()
+        self._build_exames()
+        self._build_historico()
+        self._build_prescricoes()
+        self._build_symptom_diary()  # Novo
+        self._build_education()  # Novo
+        self._build_perfil()
+        self._build_relatorios()
+
+        # Toolbar tema
+        self.theme_btn = QPushButton("Alternar Tema")
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.statusBar().addPermanentWidget(self.theme_btn)
+
+        # Botão seguro de exclusão de conta na status bar
+        self.btn_delete_account = QPushButton('Excluir Minha Conta')
+        self.btn_delete_account.setProperty('danger', True)
+        self.btn_delete_account.clicked.connect(lambda: QMessageBox.information(self, 'Conta', 'Função de exclusão de conta não implementada ainda.'))
+        self.statusBar().addPermanentWidget(self.btn_delete_account)
+
+        self.refresh_all()
+
+    def apply_theme(self, theme):
+        if theme == 'light':
+            self.setStyleSheet(scale_qss(QSS_LIGHT_TEMPLATE))
+        elif theme == 'high_contrast':
+            self.setStyleSheet(scale_qss(QSS_HIGH_CONTRAST_TEMPLATE))
+        else:
+            self.setStyleSheet(scale_qss(QSS_DARK_TEMPLATE))
+
+        # persistir
+        settings = self.db.get_settings(self.user_id)
+        settings.theme = theme
+        self.db.set_settings(settings)
+
+    def toggle_theme(self):
+        current_settings = self.db.get_settings(self.user_id)
+        current_theme = current_settings.theme
+        new_t = 'light' if current_theme == 'dark' else ('high_contrast' if current_theme == 'light' else 'dark')
+        self.apply_theme(new_t)
+
+    # ----- Build Tabs -----
+
+    def _build_dashboard(self):
+        w = self.tab_dashboard
+        g = QGridLayout(w);
+        g.setSpacing(12)
+
+        self.card_consultas = QFrame();
+        self.card_consultas.setObjectName("card")
+        self.card_exames = QFrame();
+        self.card_exames.setObjectName("card")
+        self.card_msgs = QFrame();
+        self.card_msgs.setObjectName("card")
+
+        for i, (card, title) in enumerate([(self.card_consultas, "Anamneses"),
+                                           (self.card_exames, "Exames"),
+                                           (self.card_msgs, "Mensagens")]):
+            vb = QVBoxLayout(card)
+            vb.addWidget(QLabel(f"<b>{title}</b>"))
+            lbl = QLabel("—");
+            lbl.setProperty("muted", True)
+            vb.addWidget(lbl);
+            vb.addStretch(1)
+            g.addWidget(card, 0, i)
+        self.lbl_dash_cons = self.card_consultas.findChildren(QLabel)[1]
+        self.lbl_dash_exam = self.card_exames.findChildren(QLabel)[1]
+        self.lbl_dash_msg = self.card_msgs.findChildren(QLabel)[1]
+
+    def _build_anamnese(self):
+        w = self.tab_anamnese
+        v = QVBoxLayout(w)
+
+        form = QHBoxLayout()
+        self.c_doc = QComboBox();
+        self._populate_doctors(self.c_doc)
+        self.c_date = QDateEdit(calendarPopup=True);
+        self.c_date.setDate(QDate.currentDate())
+        self.c_time = QComboBox();
+        [self.c_time.addItem(f"{h:02d}:00") for h in range(8, 19)]
+        self.c_reason = QLineEdit();
+        self.c_reason.setPlaceholderText("Motivo")
+        btn = QPushButton("Marcar");
+        btn.clicked.connect(self._mark_consulta)
+        form.addWidget(QLabel("Médico:"));
+        form.addWidget(self.c_doc)
+        form.addWidget(QLabel("Data:"));
+        form.addWidget(self.c_date)
+        form.addWidget(QLabel("Hora:"));
+        form.addWidget(self.c_time)
+        form.addWidget(self.c_reason, 1);
+        form.addWidget(btn)
+        v.addLayout(form)
+
+        self.tbl_apps = QTableWidget(0, 7)
+        self.tbl_apps.setHorizontalHeaderLabels(["ID", "Quando", "Motivo", "Status", "Médico", "Anamnese", "Ações"])
+        self.tbl_apps.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_apps)
+
+    def _build_mensagens(self):
+        w = self.tab_mensagens
+        v = QVBoxLayout(w)
+        top = QHBoxLayout()
+        self.m_doc = QComboBox();
+        self._populate_doctors(self.m_doc)
+        top.addWidget(QLabel("Médico:"));
+        top.addWidget(self.m_doc);
+        top.addStretch(1)
+        v.addLayout(top)
+
+        self.msg_view = QTextEdit();
+        self.msg_view.setReadOnly(True)
+        v.addWidget(self.msg_view)
+
+        hb = QHBoxLayout()
+        self.msg_input = QLineEdit()
+        btn = QPushButton("Enviar");
+        btn.clicked.connect(self._send_msg)
+        hb.addWidget(self.msg_input, 1);
+        hb.addWidget(btn)
+        v.addLayout(hb)
+
+        self.m_doc.currentIndexChanged.connect(self._refresh_messages)
+
+    def _build_exames(self):
+        w = self.tab_exames
+        v = QVBoxLayout(w)
+
+        h = QHBoxLayout()
+        self.e_type = QComboBox();
+        self.e_type.addItems(sorted(list(REFERENCE_RANGES.keys())))  # Ordenar para melhor visualização
+        h.addWidget(QLabel("Exame:"));
+        h.addWidget(self.e_type)
+        v.addLayout(h)
+
+        self.plot = PlotCanvas(self, width=7, height=4)
+        v.addWidget(self.plot)
+
+        self.tbl_ex = QTableWidget(0, 5)
+        self.tbl_ex.setHorizontalHeaderLabels(["Exame", "Valor", "Un.", "Data", "Obs"])
+        self.tbl_ex.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_ex)
+
+        # anexos do paciente (somente ver)
+        self.tbl_files = QTableWidget(0, 5)  # Adicionado coluna para Tipo de Documento
+        self.tbl_files.setHorizontalHeaderLabels(["Exame", "Arquivo", "Enviado em", "Tipo", "Ações"])
+        self.tbl_files.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(QLabel("Anexos de Exames e Documentos:"))
+        v.addWidget(self.tbl_files)
+
+        self.e_type.currentIndexChanged.connect(self._refresh_exams)
+
+    def _build_historico(self):
+        w = self.tab_historico
+        v = QVBoxLayout(w)
+        self.tbl_hist = QTableWidget(0, 4)
+        self.tbl_hist.setHorizontalHeaderLabels(["Tipo", "Data/Hora", "Descrição", "Status"])
+        self.tbl_hist.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_hist)
+
+    def _build_prescricoes(self):
+        w = self.tab_prescricoes
+
+        # Usar QStackedWidget para navegação sem loading
+        self.prescription_stack = QStackedWidget()
+        w_layout = QVBoxLayout(w)
+        w_layout.addWidget(self.prescription_stack)
+
+        # Página principal de prescrições
+        main_page = QWidget()
+        v = QVBoxLayout(main_page)
+
+        # Botões de navegação
+        nav_layout = QHBoxLayout()
+        self.btn_hospital = QPushButton("Prescrições Hospitalares")
+        self.btn_outpatient = QPushButton("Receituários")
+        self.btn_hospital.setProperty("accent", True)
+        self.btn_hospital.clicked.connect(lambda: self._show_prescriptions(PrescriptionType.HOSPITAL))
+        self.btn_outpatient.clicked.connect(lambda: self._show_prescriptions(PrescriptionType.OUTPATIENT))
+        nav_layout.addWidget(self.btn_hospital)
+        nav_layout.addWidget(self.btn_outpatient)
+        nav_layout.addStretch(1)
+        v.addLayout(nav_layout)
+
+        # Tabela principal
+        self.tbl_rx = QTableWidget(0, 6)
+        self.tbl_rx.setHorizontalHeaderLabels(["ID", "Data", "Medicação", "Dosagem", "Instruções", "Tipo"])
+        self.tbl_rx.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_rx)
+
+        self.prescription_stack.addWidget(main_page)
+
+        # Página de prescrições hospitalares
+        hospital_page = QWidget()
+        h_layout = QVBoxLayout(hospital_page)
+        h_layout.addWidget(QLabel("<h3>Prescrições Hospitalares</h3>"))
+
+        back_btn = QPushButton("← Voltar")
+        back_btn.clicked.connect(lambda: self.prescription_stack.setCurrentIndex(0))
+        h_layout.addWidget(back_btn)
+
+        self.tbl_rx_hospital = QTableWidget(0, 5)
+        self.tbl_rx_hospital.setHorizontalHeaderLabels(["Data", "Medicação", "Dosagem", "Quantidade", "Instruções"])
+        self.tbl_rx_hospital.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        h_layout.addWidget(self.tbl_rx_hospital)
+
+        self.prescription_stack.addWidget(hospital_page)
+
+        # Página de receituários
+        outpatient_page = QWidget()
+        o_layout = QVBoxLayout(outpatient_page)
+        o_layout.addWidget(QLabel("<h3>Receituários para Casa</h3>"))
+
+        back_btn2 = QPushButton("← Voltar")
+        back_btn2.clicked.connect(lambda: self.prescription_stack.setCurrentIndex(0))
+        o_layout.addWidget(back_btn2)
+
+        self.tbl_rx_outpatient = QTableWidget(0, 5)
+        self.tbl_rx_outpatient.setHorizontalHeaderLabels(["Data", "Medicação", "Dosagem", "Quantidade", "Instruções"])
+        self.tbl_rx_outpatient.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        o_layout.addWidget(self.tbl_rx_outpatient)
+
+        self.prescription_stack.addWidget(outpatient_page)
+
+    def _build_symptom_diary(self):  # Novo: Diário de Sintomas
+        w = self.tab_symptom_diary
+        v = QVBoxLayout(w)
+
+        v.addWidget(QLabel("<h3>Meu Diário de Sintomas</h3>"))
+
+        # Campo para adicionar nova entrada
+        add_layout = QHBoxLayout()
+        self.symptom_input = QLineEdit()
+        self.symptom_input.setPlaceholderText(
+            "Descreva seu sintoma ou medição (ex: Dor de cabeça leve, Pressão 120/80)")
+        btn_add_symptom = QPushButton("Adicionar Entrada")
+        btn_add_symptom.clicked.connect(self._add_symptom_entry)
+        add_layout.addWidget(self.symptom_input)
+        add_layout.addWidget(btn_add_symptom)
+        v.addLayout(add_layout)
+
+        # Visualização do diário (simplesmente um QTextEdit por enquanto)
+        v.addWidget(QLabel("Histórico do Diário:"))
+        self.symptom_diary_view = QTextEdit()
+        self.symptom_diary_view.setReadOnly(True)
+        v.addWidget(self.symptom_diary_view)
+
+        self._refresh_symptom_diary()
+
+    def _add_symptom_entry(self):
+        entry = self.symptom_input.text().strip()
+        if not entry:
+            QMessageBox.warning(self, "Diário de Sintomas", "Por favor, insira uma descrição para o sintoma.")
+            return
+
+        patient = self.patient_service.get_patient(self.user_id)
+        if patient:
+            current_diary = patient.symptom_diary or ""
+            new_entry = f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {entry}\n"
+            patient.symptom_diary = new_entry + current_diary  # Adiciona no topo
+            self.patient_service.update_patient(patient)
+            self.symptom_input.clear()
+            self._refresh_symptom_diary()
+            QMessageBox.information(self, "Diário de Sintomas", "Entrada adicionada com sucesso!")
+
+    def _refresh_symptom_diary(self):
+        patient = self.patient_service.get_patient(self.user_id)
+        if patient:
+            self.symptom_diary_view.setPlainText(patient.symptom_diary or "Nenhuma entrada no diário ainda.")
+
+    def _build_education(self):  # Novo: Educação em Saúde
+        w = self.tab_education
+        v = QVBoxLayout(w)
+
+        v.addWidget(QLabel("<h3>Educação em Saúde</h3>"))
+        v.addWidget(QLabel(
+            "Aqui você encontrará materiais educativos sobre diversas condições de saúde, dicas de bem-estar e informações sobre seus tratamentos."))
+
+        # Placeholder para conteúdo educativo
+        education_content = QTextEdit()
+        education_content.setReadOnly(True)
+        education_content.setHtml("""
+            <h4>Diabetes Mellitus</h4>
+            <p>O diabetes é uma doença crônica que afeta a forma como seu corpo transforma alimentos em energia. Seu corpo produz um hormônio chamado insulina, que ajuda a glicose (açúcar) dos alimentos a entrar nas células para ser usada como energia. Se você tem diabetes, seu corpo não produz insulina suficiente ou não consegue usar a insulina que produz tão bem quanto deveria.</p>
+            <p><b>Dicas:</b></p>
+            <ul>
+                <li>Mantenha uma dieta equilibrada.</li>
+                <li>Pratique exercícios regularmente.</li>
+                <li>Monitore seus níveis de glicose.</li>
+                <li>Tome seus medicamentos conforme prescrito.</li>
+            </ul>
+            <h4>Hipertensão (Pressão Alta)</h4>
+            <p>A hipertensão arterial, ou pressão alta, é uma condição comum em que a força do sangue contra as paredes das artérias é consistentemente muito alta. Isso pode levar a problemas de saúde graves, como doenças cardíacas e derrames.</p>
+            <p><b>Dicas:</b></p>
+            <ul>
+                <li>Reduza o consumo de sal.</li>
+                <li>Evite alimentos processados.</li>
+                <li>Mantenha um peso saudável.</li>
+                <li>Evite o tabagismo e o consumo excessivo de álcool.</li>
+            </ul>
+            <p><i>Consulte sempre seu médico para informações personalizadas.</i></p>
+        """)
+        v.addWidget(education_content)
+        v.addStretch(1)
+
+    def _build_perfil(self):
+        w = self.tab_perfil
+        g = QGridLayout(w);
+        g.setSpacing(8)
+        patient = self.patient_service.get_patient(self.user_id)
+        if patient:
+            self.pf_name = QLineEdit(patient.full_name)
+            self.pf_cpf = QLineEdit(patient.cpf)
+            self.pf_birth = QLabel(patient.birthdate)
+            self.pf_age = QLabel(str(patient.age))
+            self.pf_blood = QComboBox();
+            self.pf_blood.addItems(['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']);
+            if patient.blood_type: self.pf_blood.setCurrentText(patient.blood_type)
+            self.pf_fam = QTextEdit(patient.family_history or '')
+            self.pf_all = QTextEdit(patient.allergies or '')
+            self.pf_surg = QTextEdit(patient.surgeries_history or '')
+            self.pf_other = QTextEdit(patient.other_info or '')
+        else:
+            # Valores padrão se não encontrar o paciente
+            self.pf_name = QLineEdit()
+            self.pf_cpf = QLineEdit()
+            self.pf_birth = QLabel()
+            self.pf_age = QLabel()
+            self.pf_blood = QComboBox();
+            self.pf_blood.addItems(['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'])
+            self.pf_fam = QTextEdit()
+            self.pf_all = QTextEdit()
+            self.pf_surg = QTextEdit()
+            self.pf_other = QTextEdit()
+
+        g.addWidget(QLabel("Nome"), 0, 0);
+        g.addWidget(self.pf_name, 0, 1)
+        g.addWidget(QLabel("CPF"), 1, 0);
+        g.addWidget(self.pf_cpf, 1, 1)
+        g.addWidget(QLabel("Nascimento"), 2, 0);
+        g.addWidget(self.pf_birth, 2, 1)
+        g.addWidget(QLabel("Idade"), 3, 0);
+        g.addWidget(self.pf_age, 3, 1)
+        g.addWidget(QLabel("Sangue"), 4, 0);
+        g.addWidget(self.pf_blood, 4, 1)
+        g.addWidget(QLabel("Histórico familiar"), 5, 0);
+        g.addWidget(self.pf_fam, 5, 1)
+        g.addWidget(QLabel("Alergias"), 6, 0);
+        g.addWidget(self.pf_all, 6, 1)
+        g.addWidget(QLabel("Cirurgias"), 7, 0);
+        g.addWidget(self.pf_surg, 7, 1)
+        g.addWidget(QLabel("Outras infos"), 8, 0);
+        g.addWidget(self.pf_other, 8, 1)
+        btn = QPushButton("Salvar");
+        btn.setProperty("accent", True);
+        btn.clicked.connect(self._save_profile)
+        g.addWidget(btn, 9, 1)
+
+    def _build_relatorios(self):
+        w = self.tab_relatorios
+        v = QVBoxLayout(w)
+        info = QLabel("Exportações e Relatórios")
+        v.addWidget(info)
+
+        hb = QHBoxLayout()
+        btn_csv = QPushButton("Exportar anamneses (CSV)")
+        btn_csv.clicked.connect(self._export_consultas_csv)
+        btn_pdf = QPushButton("Gerar relatório PDF")
+        btn_pdf.clicked.connect(self._gerar_pdf)
+        hb.addWidget(btn_csv);
+        hb.addWidget(btn_pdf);
+        hb.addStretch(1)
+        v.addLayout(hb)
+
+    # ----- Actions / Refresh -----
+
+    def refresh_all(self):
+        self._refresh_dashboard()
+        self._refresh_appointments()
+        self._refresh_messages()
+        self._refresh_exams()
+        self._refresh_hist()
+        self._refresh_rx()
+        self._refresh_symptom_diary()  # Novo
+
+    def _populate_doctors(self, combo):
+        combo.clear();
+        self.doc_map = {}
+        doctors = self.db.list_doctors()
+        for doctor in doctors:
+            label = f"{doctor.full_name} — {doctor.specialty or ''}".strip()
+            combo.addItem(label)
+            self.doc_map[label] = doctor.user_id
+
+    def _mark_consulta(self):
+        lbl = self.c_doc.currentText()
+        doc_id = self.doc_map.get(lbl)
+        dt = datetime.combine(self.c_date.date().toPyDate(),
+                              datetime.strptime(self.c_time.currentText(), "%H:%M").time())
+        reason = self.c_reason.text().strip()
+
+        appointment = Appointment(
+            patient_id=self.user_id,
+            doctor_id=doc_id,
+            date_time=dt.isoformat(timespec='minutes'),
+            reason=reason,
+            status=AppointmentStatus.SCHEDULED
+        )
+
+        self.appointment_service.create_appointment(appointment)
+        QMessageBox.information(self, "OK", "Anamnese marcada")
+        self._refresh_appointments();
+        self._refresh_dashboard()
+
+    def _refresh_appointments(self):
+        appointments = self.appointment_service.get_appointments_for_patient(self.user_id)
+        self.tbl_apps.setRowCount(0)
+
+        # Buscar nomes dos médicos
+        doctors = {d.user_id: d.full_name for d in self.db.list_doctors()}
+
+        for i, appointment in enumerate(appointments):
+            self.tbl_apps.insertRow(i)
+            self.tbl_apps.setItem(i, 0, QTableWidgetItem(str(appointment.id)))
+            self.tbl_apps.setItem(i, 1, QTableWidgetItem(appointment.date_time[:16]))
+            self.tbl_apps.setItem(i, 2, QTableWidgetItem(appointment.reason or ''))
+            self.tbl_apps.setItem(i, 3, QTableWidgetItem(appointment.status.value))
+            self.tbl_apps.setItem(i, 4, QTableWidgetItem(doctors.get(appointment.doctor_id, 'Desconhecido')))
+            self.tbl_apps.setItem(i, 5, QTableWidgetItem(appointment.anamnesis or ''))
+
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Cancelar");
+            btn.setProperty("danger", True)
+            btn.clicked.connect(lambda _, x=appointment.id: self._cancel_app(x))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_apps.setCellWidget(i, 6, cell)
+
+    def _cancel_app(self, aid):
+        self.appointment_service.cancel_appointment(aid)
+        self._refresh_appointments();
+        self._refresh_dashboard()
+
+    def _refresh_messages(self):
+        if not hasattr(self, "m_doc") or self.m_doc.count() == 0: return
+        doc_id = self.doc_map.get(self.m_doc.currentText())
+        conv = self.db.conversation(self.user_id, doc_id)
+        lines = [f"[{s}] {'Você' if f == self.user_id else 'Médico'}: {b}" for f, t, s, b in conv]
+        self.msg_view.setPlainText("\n".join(lines))
+
+    def _send_msg(self):
+        doc_id = self.doc_map.get(self.m_doc.currentText())
+        txt = self.msg_input.text().strip()
+        if not txt: return
+        self.db.send_message(self.user_id, doc_id, txt)
+        self.msg_input.clear();
+        self._refresh_messages()
+
+    def _refresh_exams(self):
+        exam_type = self.e_type.currentText()
+        rows = self.db.list_exam_results(self.user_id, exam_type=exam_type)
+        self.tbl_ex.setRowCount(0)
+        for i, (etype, value, unit, taken_at, notes, doc_id, eid) in enumerate(rows):
+            self.tbl_ex.insertRow(i)
+            for j, val in enumerate([etype, value, unit or '', taken_at[:16], notes or '']):
+                self.tbl_ex.setItem(i, j, QTableWidgetItem(str(val)))
+
+        # Gráfico
+        patient = self.patient_service.get_patient(self.user_id)
+        age = patient.age if patient else 30
+        series = [(taken_at, float(value)) for (etype, value, unit, taken_at, notes, doc, eid) in rows]
+        self.plot.plot_exam_series(series, exam_type, age)
+
+        # Arquivos
+        files = self.db.list_exam_files(self.user_id)
+        self.tbl_files.setRowCount(0)
+        for i, (fid, ex_type, fpath, up_at, doc_id, doc_type) in enumerate(files):  # doc_type adicionado
+            self.tbl_files.insertRow(i)
+            self.tbl_files.setItem(i, 0, QTableWidgetItem(ex_type or ''))
+            self.tbl_files.setItem(i, 1, QTableWidgetItem(Path(fpath).name))
+            self.tbl_files.setItem(i, 2, QTableWidgetItem(up_at[:16]))
+            self.tbl_files.setItem(i, 3, QTableWidgetItem(doc_type))  # Nova coluna
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Abrir");
+            btn.clicked.connect(lambda _, p=fpath: webbrowser.open(str(Path(p).resolve())))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_files.setCellWidget(i, 4, cell)  # Índice ajustado
+
+    def _refresh_hist(self):
+        # Histórico combinado de consultas e exames
+        appointments = self.appointment_service.get_appointments_for_patient(self.user_id)
+        exams = self.db.list_exam_results(self.user_id)
+
+        hist_items = []
+        for app in appointments:
+            hist_items.append(("Anamnese", app.date_time, app.reason or '', app.status.value))
+        for (etype, value, unit, taken_at, notes, doc_id, eid) in exams:
+            hist_items.append(("Exame", taken_at, f"{etype}: {value} {unit or ''}", "realizado"))
+
+        hist_items.sort(key=lambda x: x[1], reverse=True)
+
+        self.tbl_hist.setRowCount(0)
+        for i, (tipo, dt, desc, status) in enumerate(hist_items):
+            self.tbl_hist.insertRow(i)
+            for j, val in enumerate([tipo, dt[:16], desc, status]):
+                self.tbl_hist.setItem(i, j, QTableWidgetItem(str(val)))
+
+    def _show_prescriptions(self, prescription_type: PrescriptionType):
+        """Navega para a página específica de prescrições sem loading"""
+        if prescription_type == PrescriptionType.HOSPITAL:
+            self.prescription_stack.setCurrentIndex(1)
+            self._refresh_hospital_prescriptions()
+        else:
+            self.prescription_stack.setCurrentIndex(2)
+            self._refresh_outpatient_prescriptions()
+
+    def _refresh_hospital_prescriptions(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_patient(self.user_id)
+        hospital_prescriptions = [p for p in prescriptions if p.prescription_type == PrescriptionType.HOSPITAL]
+
+        self.tbl_rx_hospital.setRowCount(0)
+        for i, prescription in enumerate(hospital_prescriptions):
+            self.tbl_rx_hospital.insertRow(i)
+            self.tbl_rx_hospital.setItem(i, 0, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx_hospital.setItem(i, 1, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx_hospital.setItem(i, 2, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx_hospital.setItem(i, 3, QTableWidgetItem(str(prescription.quantity)))
+            self.tbl_rx_hospital.setItem(i, 4, QTableWidgetItem(prescription.instructions or ''))
+
+    def _refresh_outpatient_prescriptions(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_patient(self.user_id)
+        outpatient_prescriptions = [p for p in prescriptions if p.prescription_type == PrescriptionType.OUTPATIENT]
+
+        self.tbl_rx_outpatient.setRowCount(0)
+        for i, prescription in enumerate(outpatient_prescriptions):
+            self.tbl_rx_outpatient.insertRow(i)
+            self.tbl_rx_outpatient.setItem(i, 0, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx_outpatient.setItem(i, 1, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx_outpatient.setItem(i, 2, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx_outpatient.setItem(i, 3, QTableWidgetItem(str(prescription.quantity)))
+            self.tbl_rx_outpatient.setItem(i, 4, QTableWidgetItem(prescription.instructions or ''))
+
+    def _refresh_rx(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_patient(self.user_id)
+        self.tbl_rx.setRowCount(0)
+        for i, prescription in enumerate(prescriptions):
+            self.tbl_rx.insertRow(i)
+            self.tbl_rx.setItem(i, 0, QTableWidgetItem(str(prescription.id)))
+            self.tbl_rx.setItem(i, 1, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx.setItem(i, 2, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx.setItem(i, 3, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx.setItem(i, 4, QTableWidgetItem(prescription.instructions or ''))
+            self.tbl_rx.setItem(i, 5, QTableWidgetItem(prescription.prescription_type.value))
+
+    def _save_profile(self):
+        patient = self.patient_service.get_patient(self.user_id)
+        if patient:
+            patient.full_name = self.pf_name.text().strip()
+            patient.cpf = self.pf_cpf.text().strip()
+            patient.blood_type = self.pf_blood.currentText()
+            patient.family_history = self.pf_fam.toPlainText()
+            patient.allergies = self.pf_all.toPlainText()
+            patient.surgeries_history = self.pf_surg.toPlainText()
+            patient.other_info = self.pf_other.toPlainText()
+            # Recalcular idade se necessário
+            patient.age = calc_age(patient.birthdate)
+
+            self.patient_service.update_patient(patient)
+            QMessageBox.information(self, "OK", "Perfil atualizado!")
+
+    def _refresh_dashboard(self):
+        appointments = self.appointment_service.get_appointments_for_patient(self.user_id)
+        exams = self.db.list_exam_results(self.user_id)
+
+        # Contar consultas por status
+        scheduled = len([a for a in appointments if a.status == AppointmentStatus.SCHEDULED])
+        self.lbl_dash_cons.setText(f"{scheduled} agendadas")
+
+        # Contar exames
+        self.lbl_dash_exam.setText(f"{len(exams)} resultados")
+
+        # Mensagens (simplificado)
+        self.lbl_dash_msg.setText("Ver conversas")
+
+    def _export_consultas_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Anamneses", "anamneses.csv", "CSV (*.csv)")
+        if not path: return
+
+        appointments = self.appointment_service.get_appointments_for_patient(self.user_id)
+        doctors = {d.user_id: d.full_name for d in self.db.list_doctors()}
+
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Data/Hora", "Motivo", "Status", "Médico", "Anamnese"])
+            for app in appointments:
+                writer.writerow([app.id, app.date_time, app.reason or '', app.status.value,
+                                 doctors.get(app.doctor_id, 'Desconhecido'), app.anamnesis or ''])
+        QMessageBox.information(self, "CSV", "Anamneses exportadas!")
+
+    def _gerar_pdf(self):
+        if not REPORTLAB_OK:
+            QMessageBox.warning(self, "PDF", "ReportLab não instalado.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Salvar PDF", "relatorio_paciente.pdf", "PDF (*.pdf)")
+        if not path: return
+
+        patient = self.patient_service.get_patient(self.user_id)
+        appointments = self.appointment_service.get_appointments_for_patient(self.user_id)
+        prescriptions = self.prescription_service.get_prescriptions_for_patient(self.user_id)
+        exam_results = self.db.list_exam_results(self.user_id)
+        exam_files = self.db.list_exam_files(self.user_id)
+        symptom_diary_entries = (patient.symptom_diary or "").split('\n') if patient else []
+
+        doc = SimpleDocTemplate(path, pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+
+        # Título
+        story.append(
+            Paragraph(f"<b>Relatório Médico - {patient.full_name if patient else 'Paciente'}</b>", styles['h1']))
+        story.append(Spacer(1, 12))
+
+        # Dados do Paciente
+        if patient:
+            story.append(Paragraph(
+                f"<b>CPF:</b> {patient.cpf} | <b>Nascimento:</b> {patient.birthdate} (Idade: {patient.age}) | <b>Tipo Sanguíneo:</b> {patient.blood_type}",
+                styles['Normal']))
+            story.append(Paragraph(f"<b>Histórico Familiar:</b> {patient.family_history or 'N/A'}", styles['Normal']))
+            story.append(Paragraph(f"<b>Alergias:</b> {patient.allergies or 'N/A'}", styles['Normal']))
+            story.append(
+                Paragraph(f"<b>Histórico de Cirurgias:</b> {patient.surgeries_history or 'N/A'}", styles['Normal']))
+            story.append(Paragraph(f"<b>Outras Informações:</b> {patient.other_info or 'N/A'}", styles['Normal']))
+            story.append(Spacer(1, 12))
+
+        # Anamneses
+        story.append(Paragraph("<b>Anamneses:</b>", styles['h2']))
+        if appointments:
+            data = [["Data/Hora", "Motivo", "Status", "Médico", "Anamnese"]]
+            doctors = {d.user_id: d.full_name for d in self.db.list_doctors()}
+            for app in appointments:
+                data.append(
+                    [app.date_time[:16], app.reason or '', app.status.value, doctors.get(app.doctor_id, 'Desconhecido'),
+                     app.anamnesis or ''])
+            table = Table(data, colWidths=[80, 120, 60, 100, 150])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhuma anamnese registrada.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Prescrições
+        story.append(Paragraph("<b>Prescrições:</b>", styles['h2']))
+        if prescriptions:
+            data = [["Data", "Medicação", "Dosagem", "Instruções", "Tipo"]]
+            for rx in prescriptions:
+                data.append([rx.created_at[:16], rx.medication_name, rx.dosage or '', rx.instructions or '',
+                             rx.prescription_type.value])
+            table = Table(data, colWidths=[80, 120, 80, 150, 80])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhuma prescrição registrada.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Resultados de Exames
+        story.append(Paragraph("<b>Resultados de Exames:</b>", styles['h2']))
+        if exam_results:
+            data = [["Exame", "Valor", "Unidade", "Data", "Notas"]]
+            for (etype, value, unit, taken_at, notes, doc_id, eid) in exam_results:
+                data.append([etype, str(value), unit or '', taken_at[:16], notes or ''])
+            table = Table(data, colWidths=[100, 60, 40, 80, 180])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhum resultado de exame registrado.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Anexos de Exames e Documentos
+        story.append(Paragraph("<b>Anexos de Exames e Documentos:</b>", styles['h2']))
+        if exam_files:
+            data = [["Tipo", "Nome do Arquivo", "Enviado em"]]
+            for (fid, ex_type, fpath, up_at, doc_id, doc_type) in exam_files:
+                data.append([doc_type, Path(fpath).name, up_at[:16]])
+            table = Table(data, colWidths=[100, 200, 100])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhum anexo de exame ou documento.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Diário de Sintomas
+        story.append(Paragraph("<b>Diário de Sintomas:</b>", styles['h2']))
+        if symptom_diary_entries:
+            for entry in symptom_diary_entries:
+                if entry.strip():
+                    story.append(Paragraph(entry, styles['Normal']))
+            story.append(Spacer(1, 6))
+        else:
+            story.append(Paragraph("Nenhuma entrada no diário de sintomas.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        try:
+            doc.build(story)
+            QMessageBox.information(self, "PDF", "Relatório gerado com sucesso!")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao Gerar PDF", f"Ocorreu um erro: {e}")
+
+
+# --------------------------- MÉDICO (TABS) ---------------------------
+
+class DoctorWindow(QMainWindow):
+    def apply_theme(self, theme):
+        if theme == 'light':
+            self.setStyleSheet(scale_qss(QSS_LIGHT_TEMPLATE))
+        elif theme == 'high_contrast':
+            self.setStyleSheet(scale_qss(QSS_HIGH_CONTRAST_TEMPLATE))
+        else:
+            self.setStyleSheet(scale_qss(QSS_DARK_TEMPLATE))
+        settings = self.db.get_settings(self.user_id)
+        settings.theme = theme
+        self.db.set_settings(settings)
+
+    def __init__(self, db: DB, user_id: int):
+
+
+
+        super().__init__()
+        self.db = db
+        self.user_id = user_id
+        self.setWindowTitle("Médico — Prontuário")
+        self.resize(scaled_value(1400), scaled_value(860))
+
+        # Inicializar serviços
+        self.doctor_service = DoctorService(self.db)
+        self.patient_service = PatientService(self.db)
+        self.appointment_service = AppointmentService(self.db)
+        self.pharmacy_service = PharmacyService(self.db)
+        self.prescription_service = PrescriptionService(self.db, self.pharmacy_service)
+
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+
+        self.tab_agenda = QWidget()
+        self.tab_conversas = QWidget()
+        self.tab_pacientes = QWidget()
+        self.tab_exames = QWidget()
+        self.tab_prescricoes = QWidget()
+        self.tab_farmacia = QWidget()
+        self.tab_notas = QWidget()
+        self.tab_relatorios = QWidget()
+        self.tab_config = QWidget()
+        self.tab_telemedicine = QWidget()  # Novo: Telemedicina
+        self.tab_documents = QWidget()  # Novo: Gestão de Documentos
+        self.tab_ai_insights = QWidget()  # Novo: Insights de IA
+
+        self.tabs.addTab(self.tab_agenda, icon("fa.calendar", "#60a5fa"), "Agenda")
+        self.tabs.addTab(self.tab_conversas, icon("fa.comments", "#f59e0b"), "Conversas")
+        self.tabs.addTab(self.tab_pacientes, icon("fa.users", "#34d399"), "Pacientes")
+        self.tabs.addTab(self.tab_exames, icon("fa.flask", "#f87171"), "Exames")
+        self.tabs.addTab(self.tab_prescricoes, icon("fa.sticky-note", "#22c55e"), "Prescrições")
+        self.tabs.addTab(self.tab_farmacia, icon("fa.medkit", "#f59e0b"), "Farmácia")
+        self.tabs.addTab(self.tab_notas, icon("fa.lock", "#a78bfa"), "Notas (Priv.)")
+        self.tabs.addTab(self.tab_documents, icon("fa.file-text-o", "#6ee7b7"), "Documentos")  # Novo
+        self.tabs.addTab(self.tab_telemedicine, icon("fa.video-camera", "#f97316"), "Telemedicina")  # Novo
+        self.tabs.addTab(self.tab_ai_insights, icon("fa.magic", "#a855f7"), "Insights IA")  # Novo
+        self.tabs.addTab(self.tab_relatorios, icon("fa.file-pdf-o", "#ef4444"), "Relatórios")
+        self.tabs.addTab(self.tab_config, icon("fa.cog", "#93c5fd"), "Config")
+
+        self._build_agenda()
+        self._build_conversas()
+        self._build_pacientes()
+        self._build_exames()
+        self._build_prescricoes()
+        self._build_farmacia()
+        self._build_notas()
+        self._build_documents()  # Novo
+        self._build_telemedicine()  # Novo
+        self._build_ai_insights()  # Novo
+        self._build_relatorios()
+        self._build_config()
+
+        # Toolbar tema
+        self.theme_btn = QPushButton("Alternar Tema")
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        self.statusBar().addPermanentWidget(self.theme_btn)
+
+        # Botão seguro de exclusão de conta na status bar
+        self.btn_delete_account = QPushButton('Excluir Minha Conta')
+        self.btn_delete_account.setProperty('danger', True)
+        self.btn_delete_account.clicked.connect(lambda: QMessageBox.information(self, 'Conta', 'Função de exclusão de conta não implementada ainda.'))
+        self.statusBar().addPermanentWidget(self.btn_delete_account)
+
+        # Busca global (placeholder)
+        self.global_search_input = QLineEdit()
+        self.global_search_input.setPlaceholderText("Busca global (pacientes, exames, notas...)")
+        self.global_search_input.returnPressed.connect(self._perform_global_search)
+        self.statusBar().addPermanentWidget(self.global_search_input)
+
+        self.refresh_all()
+
+    def apply_theme(self, theme):
+        if theme == 'light':
+            self.setStyleSheet(scale_qss(QSS_LIGHT_TEMPLATE))
+        elif theme == 'high_contrast':
+            self.setStyleSheet(scale_qss(QSS_HIGH_CONTRAST_TEMPLATE))
+        else:
+            self.setStyleSheet(scale_qss(QSS_DARK_TEMPLATE))
+
+        settings = self.db.get_settings(self.user_id)
+        settings.theme = theme
+        self.db.set_settings(settings)
+
+    def toggle_theme(self):
+        current_settings = self.db.get_settings(self.user_id)
+        current_theme = current_settings.theme
+        new_t = 'light' if current_theme == 'dark' else ('high_contrast' if current_theme == 'light' else 'dark')
+        self.apply_theme(new_t)
+
+    def _perform_global_search(self):
+        query = self.global_search_input.text().strip()
+        if not query: return
+        QMessageBox.information(self, "Busca Global",
+                                f"Funcionalidade de busca global para '{query}' seria implementada aqui.")
+        # Implementação real envolveria buscar em todas as tabelas relevantes (pacientes, exames, notas, etc.)
+
+    def refresh_all(self):
+        self._refresh_agenda()
+        self._populate_patients()
+        self._populate_patients_combo()
+        self._refresh_files_table()
+        self._refresh_exam_table()
+        self._refresh_rx_table()
+        self._refresh_notes_table()
+        self._refresh_pharmacy()
+        self._refresh_documents_table()  # Novo
+
+    # ----- Agenda -----
+    def _build_agenda(self):
+        w = self.tab_agenda
+        v = QVBoxLayout(w)
+        f = QHBoxLayout()
+        self.f_status = QComboBox();
+        self.f_status.addItems(['', 'marcada', 'realizada', 'cancelada'])
+        self.f_from = QDateEdit(calendarPopup=True);
+        self.f_from.setDate(QDate.currentDate().addDays(-30))
+        self.f_to = QDateEdit(calendarPopup=True);
+        self.f_to.setDate(QDate.currentDate().addDays(30))
+        btn = QPushButton("Filtrar");
+        btn.clicked.connect(self._refresh_agenda)
+        f.addWidget(QLabel("Status"));
+        f.addWidget(self.f_status)
+        f.addWidget(QLabel("De"));
+        f.addWidget(self.f_from)
+        f.addWidget(QLabel("Até"));
+        f.addWidget(self.f_to)
+        f.addWidget(btn);
+        f.addStretch(1)
+        v.addLayout(f)
+
+        self.tbl_agenda = QTableWidget(0, 8)
+        self.tbl_agenda.setHorizontalHeaderLabels(
+            ["ID", "Quando", "Motivo", "Status", "Paciente", "Anamnese", "Notas", "Ações"])
+        self.tbl_agenda.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_agenda)
+
+    def _refresh_agenda(self):
+        appointments = self.appointment_service.get_appointments_for_doctor(self.user_id)
+        # filtros simples (client-side)
+        status_f = self.f_status.currentText()
+        d_from = self.f_from.date().toPyDate()
+        d_to = self.f_to.date().toPyDate()
+        filtered = []
+        for appointment in appointments:
+            d = datetime.fromisoformat(appointment.date_time).date()
+            if status_f and appointment.status.value != status_f: continue
+            if d < d_from or d > d_to: continue
+            filtered.append(appointment)
+
+        self.tbl_agenda.setRowCount(0)
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        for i, appointment in enumerate(filtered):
+            self.tbl_agenda.insertRow(i)
+            self.tbl_agenda.setItem(i, 0, QTableWidgetItem(str(appointment.id)))
+            self.tbl_agenda.setItem(i, 1, QTableWidgetItem(appointment.date_time[:16]))
+            self.tbl_agenda.setItem(i, 2, QTableWidgetItem(appointment.reason or ''))
+            self.tbl_agenda.setItem(i, 3, QTableWidgetItem(appointment.status.value))
+            self.tbl_agenda.setItem(i, 4, QTableWidgetItem(patients.get(appointment.patient_id, 'Desconhecido')))
+            self.tbl_agenda.setItem(i, 5, QTableWidgetItem(appointment.anamnesis or ''))
+            self.tbl_agenda.setItem(i, 6, QTableWidgetItem(appointment.notes or ''))
+
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            bt_done = QPushButton("Realizada");
+            bt_done.clicked.connect(lambda _, x=appointment.id: self._mark_done(x))
+            bt_cancel = QPushButton("Cancelar");
+            bt_cancel.setProperty("danger", True);
+            bt_cancel.clicked.connect(lambda _, x=appointment.id: self._cancel_app(x))
+            bt_anamnesis = QPushButton("Anamnese");
+            bt_anamnesis.setProperty("accent", True);
+            bt_anamnesis.clicked.connect(lambda _, x=appointment.id: self._edit_anamnesis(x))
+            hl.addWidget(bt_done);
+            hl.addWidget(bt_cancel);
+            hl.addWidget(bt_anamnesis);
+            hl.addStretch(1)
+            self.tbl_agenda.setCellWidget(i, 7, cell)
+
+    def _mark_done(self, aid):
+        appointment = self.db.get_appointment(aid)
+        if appointment:
+            appointment.status = AppointmentStatus.COMPLETED
+            self.appointment_service.update_appointment(appointment)
+        self._refresh_agenda()
+
+    def _cancel_app(self, aid):
+        self.appointment_service.cancel_appointment(aid)
+        self._refresh_agenda()
+
+    def _edit_anamnesis(self, aid):
+        """Abre diálogo para editar anamnese"""
+        appointment = self.db.get_appointment(aid)
+        if not appointment:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Editar Anamnese")
+        dlg.resize(600, 400)
+
+        layout = QVBoxLayout(dlg)
+
+        # Informações do paciente
+        patient = self.patient_service.get_patient(appointment.patient_id)
+        if patient:
+            info_label = QLabel(f"Paciente: {patient.full_name} | Data: {appointment.date_time[:16]}")
+            layout.addWidget(info_label)
+
+        # Campo de anamnese
+        layout.addWidget(QLabel("Anamnese:"))
+        anamnesis_edit = QTextEdit()
+        anamnesis_edit.setPlainText(appointment.anamnesis or '')
+        layout.addWidget(anamnesis_edit)
+
+        # Campo de notas
+        layout.addWidget(QLabel("Notas:"))
+        notes_edit = QTextEdit()
+        notes_edit.setPlainText(appointment.notes or '')
+        layout.addWidget(notes_edit)
+
+        # Botões
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("Salvar")
+        btn_save.setProperty("accent", True)
+        btn_cancel = QPushButton("Cancelar")
+
+        def save_anamnesis():
+            appointment.anamnesis = anamnesis_edit.toPlainText()
+            appointment.notes = notes_edit.toPlainText()
+            self.appointment_service.update_appointment(appointment)
+            dlg.accept()
+            self._refresh_agenda()
+
+        btn_save.clicked.connect(save_anamnesis)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addStretch(1)
+        layout.addLayout(btn_layout)
+
+        dlg.exec_()
+
+    # ----- Conversas -----
+    def _build_conversas(self):
+        w = self.tab_conversas
+        v = QVBoxLayout(w)
+        top = QHBoxLayout()
+        self.conv_patient = QComboBox();
+        self._populate_patients_combo(self.conv_patient)
+        top.addWidget(QLabel("Paciente"));
+        top.addWidget(self.conv_patient);
+        top.addStretch(1)
+        v.addLayout(top)
+
+        self.conv_view = QTextEdit();
+        self.conv_view.setReadOnly(True)
+        v.addWidget(self.conv_view)
+
+        hb = QHBoxLayout()
+        self.conv_input = QLineEdit()
+        bt = QPushButton("Enviar");
+        bt.clicked.connect(self._send_conv)
+        hb.addWidget(self.conv_input, 1);
+        hb.addWidget(bt)
+        v.addLayout(hb)
+
+        self.conv_patient.currentIndexChanged.connect(self._refresh_conv)
+
+    def _refresh_conv(self):
+        if self.conv_patient.count() == 0: return
+        pid = self.pat_map.get(self.conv_patient.currentText())
+        conv = self.db.conversation(self.user_id, pid)
+        lines = [f"[{s}] {'Você' if f == self.user_id else 'Paciente'}: {b}" for f, t, s, b in conv]
+        self.conv_view.setPlainText("\n".join(lines))
+
+    def _send_conv(self):
+        pid = self.pat_map.get(self.conv_patient.currentText())
+        txt = self.conv_input.text().strip()
+        if not txt: return
+        self.db.send_message(self.user_id, pid, txt)
+        self.conv_input.clear();
+        self._refresh_conv()
+
+    # ----- Pacientes -----
+    def _build_pacientes(self):
+        w = self.tab_pacientes
+        v = QVBoxLayout(w)
+        top = QHBoxLayout()
+        self.search_pat = QLineEdit();
+        self.search_pat.setPlaceholderText("Buscar...")
+        bt = QPushButton("Buscar");
+        bt.clicked.connect(self._populate_patients)
+        top.addWidget(self.search_pat, 1);
+        top.addWidget(bt)
+        v.addLayout(top)
+        self.tbl_patients = QTableWidget(0, 6)
+        self.tbl_patients.setHorizontalHeaderLabels(["ID", "Nome", "CPF", "Idade", "Sangue", "Ações"])
+        self.tbl_patients.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_patients)
+
+    def _populate_patients(self):
+        patients = self.patient_service.list_all_patients()
+        self.tbl_patients.setRowCount(0)
+        self.pat_map = {}
+        q = self.search_pat.text().strip().lower() if hasattr(self, "search_pat") else ""
+
+        for i, patient in enumerate(patients):
+            if q and q not in patient.full_name.lower() and q not in (patient.cpf or "").lower():
+                continue
+            self.tbl_patients.insertRow(i)
+            self.tbl_patients.setItem(i, 0, QTableWidgetItem(str(patient.user_id)))
+            self.tbl_patients.setItem(i, 1, QTableWidgetItem(patient.full_name))
+            self.tbl_patients.setItem(i, 2, QTableWidgetItem(patient.cpf or ''))
+            self.tbl_patients.setItem(i, 3, QTableWidgetItem(str(patient.age)))
+            self.tbl_patients.setItem(i, 4, QTableWidgetItem(patient.blood_type or ''))
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Ver");
+            btn.clicked.connect(lambda _, x=patient.user_id: self._view_patient(x))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_patients.setCellWidget(i, 5, cell)
+            self.pat_map[str(patient.user_id)] = patient.user_id
+
+    def _view_patient(self, uid):
+        patient = self.patient_service.get_patient(uid)
+        if not patient:
+            QMessageBox.information(self, "Info", "Paciente não encontrado.")
+            return
+        QMessageBox.information(self, patient.full_name,
+                                f"CPF: {patient.cpf}\nNascimento: {patient.birthdate} (idade {patient.age})\nSangue: {patient.blood_type}\n\n"
+                                f"Hist.familiar: {patient.family_history}\nAlergias: {patient.allergies}\nCirurgias: {patient.surgeries_history}\nOutras: {patient.other_info}")
+
+    def _populate_patients_combo(self, combo=None):
+        # Popula o combo de pacientes para conversas, exames, prescrições, notas, etc.
+        # Se nenhum combo for passado, tenta popular o de conversas
+        if combo is None:
+            if hasattr(self, 'conv_patient'):
+                combo = self.conv_patient
+            else:
+                return  # Nenhum combo para popular
+
+        combo.clear();
+        self.pat_map = {}
+        patients = self.patient_service.list_all_patients()
+        for patient in patients:
+            lbl = f"{patient.full_name} — CPF {patient.cpf}"
+            combo.addItem(lbl)
+            self.pat_map[lbl] = patient.user_id
+
+        # Popula outros combos se existirem
+        if hasattr(self, 'ex_patient') and combo != self.ex_patient:
+            self.ex_patient.clear()
+            for patient in patients:
+                lbl = f"{patient.full_name} — CPF {patient.cpf}"
+                self.ex_patient.addItem(lbl)
+        if hasattr(self, 'up_patient') and combo != self.up_patient:
+            self.up_patient.clear()
+            for patient in patients:
+                lbl = f"{patient.full_name} — CPF {patient.cpf}"
+                self.up_patient.addItem(lbl)
+        if hasattr(self, 'rx_patient') and combo != self.rx_patient:
+            self.rx_patient.clear()
+            for patient in patients:
+                lbl = f"{patient.full_name} — CPF {patient.cpf}"
+                self.rx_patient.addItem(lbl)
+        if hasattr(self, 'notes_patient') and combo != self.notes_patient:
+            self.notes_patient.clear()
+            for patient in patients:
+                lbl = f"{patient.full_name} — CPF {patient.cpf}"
+                self.notes_patient.addItem(lbl)
+        if hasattr(self, 'doc_patient') and combo != self.doc_patient:  # Novo combo para documentos
+            self.doc_patient.clear()
+            for patient in patients:
+                lbl = f"{patient.full_name} — CPF {patient.cpf}"
+                self.doc_patient.addItem(lbl)
+
+    # ----- Exames -----
+    def _build_exames(self):
+        w = self.tab_exames
+        v = QVBoxLayout(w)
+        # Inserção de resultado
+        form = QHBoxLayout()
+        self.ex_patient = QComboBox();
+        self._populate_patients_combo(self.ex_patient)
+        self.ex_type = QComboBox();
+        self.ex_type.addItems(sorted(list(REFERENCE_RANGES.keys())))  # Ordenar
+        self.ex_value = QLineEdit();
+        self.ex_value.setPlaceholderText("Valor")
+        self.ex_unit = QLineEdit();
+        self.ex_unit.setPlaceholderText("Unidade")
+        self.ex_date = QDateTimeEdit(QDateTime.currentDateTime());
+        self.ex_date.setCalendarPopup(True)
+        self.ex_notes = QLineEdit();
+        self.ex_notes.setPlaceholderText("Observações")
+        btn_add = QPushButton("Adicionar Resultado");
+        btn_add.clicked.connect(self._add_exam_result)
+        form.addWidget(QLabel("Paciente"));
+        form.addWidget(self.ex_patient)
+        form.addWidget(QLabel("Exame"));
+        form.addWidget(self.ex_type)
+        form.addWidget(self.ex_value);
+        form.addWidget(self.ex_unit)
+        form.addWidget(self.ex_date);
+        form.addWidget(self.ex_notes, 1);
+        form.addWidget(btn_add)
+        v.addLayout(form)
+
+        # Upload de arquivo
+        h = QHBoxLayout()
+        self.up_patient = QComboBox();
+        self._populate_patients_combo(self.up_patient)
+        self.up_type = QComboBox();
+        self.up_type.addItems(['PDF', 'Imagem', 'Outro'])
+        bfile = QPushButton("Selecionar Arquivo");
+        bfile.clicked.connect(self._select_exam_file)
+        self.sel_path = QLabel("-");
+        self.sel_path.setProperty("muted", True)
+        bsend = QPushButton("Enviar Anexo");
+        bsend.clicked.connect(self._upload_exam_file)
+        h.addWidget(QLabel("Paciente"));
+        h.addWidget(self.up_patient)
+        h.addWidget(QLabel("Tipo"));
+        h.addWidget(self.up_type)
+        h.addWidget(bfile);
+        h.addWidget(self.sel_path, 1);
+        h.addWidget(bsend)
+        v.addLayout(h)
+
+        # Resultados (visão do médico - lista geral)
+        self.tbl_exam = QTableWidget(0, 7)
+        self.tbl_exam.setHorizontalHeaderLabels(["Paciente", "Exame", "Valor", "Un.", "Data", "Notas", "Ações"])
+        self.tbl_exam.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_exam)
+
+        # Arquivos (agora na aba de Documentos)
+        # self.tbl_files = QTableWidget(0, 4)
+        # self.tbl_files.setHorizontalHeaderLabels(["Paciente", "Arquivo", "Enviado em", "Ações"])
+        # self.tbl_files.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # v.addWidget(self.tbl_files)
+
+    def _add_exam_result(self):
+        pid = self.pat_map.get(self.ex_patient.currentText())
+        if pid is None:
+            QMessageBox.warning(self, "Exames", "Selecione um paciente.")
+            return
+        try:
+            value = float(self.ex_value.text().strip())
+        except Exception:
+            QMessageBox.warning(self, "Exames", "Valor inválido.")
+            return
+        self.db.add_exam_result(
+            patient_id=pid, doctor_id=self.user_id,
+            exam_type=self.ex_type.currentText(),
+            value=value,
+            unit=self.ex_unit.text().strip(),
+            taken_at_iso=self.ex_date.dateTime().toString(Qt.ISODate)[:16],
+            notes=self.ex_notes.text().strip()
+        )
+        self._refresh_exam_table()
+        QMessageBox.information(self, "OK", "Resultado incluído.")
+
+    def _select_exam_file(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Selecionar Arquivo", "", "Todos (*.*)")
+        if p:
+            self.sel_path.setText(p)
+
+    def _upload_exam_file(self):
+        pid = self.pat_map.get(self.up_patient.currentText())
+        if pid is None:
+            QMessageBox.warning(self, "Upload", "Selecione um paciente.")
+            return
+        p = self.sel_path.text()
+        if not p or p == "-":
+            QMessageBox.warning(self, "Upload", "Selecione um arquivo.")
+            return
+        self.db.add_exam_file(patient_id=pid, doctor_id=self.user_id, exam_type=self.up_type.currentText(), file_path=p)
+        self.sel_path.setText("-")
+        self._refresh_files_table()  # Atualiza a tabela de arquivos na aba de Documentos
+        QMessageBox.information(self, "OK", "Arquivo anexado.")
+
+    def _refresh_exam_table(self):
+        # mostrar últimos 200 resultados de exames, de todos pacientes (médico)
+        rows_all = []
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+        for patient in self.patient_service.list_all_patients():
+            rows = self.db.list_exam_results(patient.user_id)
+            for (etype, value, unit, taken_at, notes, doc_id, eid) in rows:
+                rows_all.append((patient.full_name, etype, value, unit, taken_at, notes, patient.user_id))
+        rows_all.sort(key=lambda r: r[4], reverse=True)
+        rows_all = rows_all[:200]
+
+        self.tbl_exam.setRowCount(0)
+        for i, (pname, etype, value, unit, taken_at, notes, pid) in enumerate(rows_all):
+            self.tbl_exam.insertRow(i)
+            for j, val in enumerate([pname, etype, value, unit or '', taken_at[:16], notes or '']):
+                self.tbl_exam.setItem(i, j, QTableWidgetItem(str(val)))
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Ver Gráfico");
+            btn.clicked.connect(lambda _, xpid=pid, ext=etype: self._show_patient_exam_plot(xpid, ext))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_exam.setCellWidget(i, 6, cell)
+
+    def _refresh_files_table(self):
+        # Esta função agora atualiza a tabela na aba de Documentos
+        if not hasattr(self, 'tbl_documents'): return  # Garante que a tabela existe
+
+        rows_all = []
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+        for patient in self.patient_service.list_all_patients():
+            for (fid, ex_type, fpath, up_at, doc_id, doc_type) in self.db.list_exam_files(patient.user_id):
+                rows_all.append((patient.full_name, fpath, up_at, doc_type, patient.user_id))
+        rows_all.sort(key=lambda r: r[2], reverse=True)
+        self.tbl_documents.setRowCount(0)  # Atualiza tbl_documents
+        for i, (pname, fpath, up_at, doc_type, pid) in enumerate(rows_all):
+            self.tbl_documents.insertRow(i)
+            self.tbl_documents.setItem(i, 0, QTableWidgetItem(pname))
+            self.tbl_documents.setItem(i, 1, QTableWidgetItem(Path(fpath).name))
+            self.tbl_documents.setItem(i, 2, QTableWidgetItem(up_at[:16]))
+            self.tbl_documents.setItem(i, 3, QTableWidgetItem(doc_type))
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Abrir");
+            btn.clicked.connect(lambda _, p=fpath: webbrowser.open(str(Path(p).resolve())))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_documents.setCellWidget(i, 4, cell)
+
+    def _show_patient_exam_plot(self, patient_id, exam_type):
+        # janela simples com gráfico
+        dlg = QDialog(self);
+        dlg.setWindowTitle(f"Exames — {exam_type}")
+        v = QVBoxLayout(dlg)
+        plot = PlotCanvas(dlg, width=6, height=4)
+        patient = self.patient_service.get_patient(patient_id)
+        age = patient.age if patient else 30
+        rows = self.db.list_exam_results(patient_id, exam_type=exam_type)
+        series = [(taken_at, float(value)) for (etype, value, unit, taken_at, notes, doc, eid) in rows]
+        plot.plot_exam_series(series, exam_type, age)
+        v.addWidget(plot)
+        close = QPushButton("Fechar");
+        close.clicked.connect(dlg.accept)
+        v.addWidget(close, alignment=Qt.AlignRight)
+        dlg.resize(720, 460);
+        dlg.exec_()
+
+    # ----- Prescrições -----
+    def _build_prescricoes(self):
+        w = self.tab_prescricoes
+
+        # Usar QStackedWidget para navegação sem loading
+        self.prescription_stack = QStackedWidget()
+        w_layout = QVBoxLayout(w)
+        w_layout.addWidget(self.prescription_stack)
+
+        # Página principal de prescrições
+        main_page = QWidget()
+        v = QVBoxLayout(main_page)
+
+        # Formulário para nova prescrição
+        form_layout = QGridLayout()
+
+        self.rx_patient = QComboBox();
+        self._populate_patients_combo(self.rx_patient)
+        self.rx_medication = QComboBox();
+        self._populate_medications()
+        self.rx_dosage = QLineEdit();
+        self.rx_dosage.setPlaceholderText("Ex: 500mg")
+        self.rx_instructions = QTextEdit();  # Alterado para QTextEdit para mais espaço
+        self.rx_instructions.setPlaceholderText("Ex: Tomar 1 comprimido a cada 8 horas por 7 dias.")
+        self.rx_instructions.setMaximumHeight(60)
+        self.rx_quantity = QSpinBox();
+        self.rx_quantity.setMinimum(1);
+        self.rx_quantity.setMaximum(999);
+        self.rx_quantity.setValue(1)
+        self.rx_type = QComboBox();
+        self.rx_type.addItems(["Receituário (para casa)", "Prescrição Hospitalar"])
+
+        form_layout.addWidget(QLabel("Paciente:"), 0, 0)
+        form_layout.addWidget(self.rx_patient, 0, 1)
+        form_layout.addWidget(QLabel("Medicamento:"), 0, 2)
+        form_layout.addWidget(self.rx_medication, 0, 3)
+        form_layout.addWidget(QLabel("Dosagem:"), 1, 0)
+        form_layout.addWidget(self.rx_dosage, 1, 1)
+        form_layout.addWidget(QLabel("Quantidade:"), 1, 2)
+        form_layout.addWidget(self.rx_quantity, 1, 3)
+        form_layout.addWidget(QLabel("Instruções:"), 2, 0)
+        form_layout.addWidget(self.rx_instructions, 2, 1, 1, 2)
+        form_layout.addWidget(QLabel("Tipo:"), 2, 3)
+        form_layout.addWidget(self.rx_type, 2, 4)
+
+        btn_create = QPushButton("Criar Prescrição")
+        btn_create.setProperty("accent", True)
+        btn_create.clicked.connect(self._create_prescription)
+        form_layout.addWidget(btn_create, 3, 0, 1, 2)
+
+        v.addLayout(form_layout)
+
+        # Botões de navegação
+        nav_layout = QHBoxLayout()
+        self.btn_hospital = QPushButton("Prescrições Hospitalares")
+        self.btn_outpatient = QPushButton("Receituários")
+        self.btn_hospital.clicked.connect(lambda: self._show_prescriptions_doctor(PrescriptionType.HOSPITAL))
+        self.btn_outpatient.clicked.connect(lambda: self._show_prescriptions_doctor(PrescriptionType.OUTPATIENT))
+        nav_layout.addWidget(self.btn_hospital)
+        nav_layout.addWidget(self.btn_outpatient)
+        nav_layout.addStretch(1)
+        v.addLayout(nav_layout)
+
+        # Tabela principal
+        self.tbl_rx = QTableWidget(0, 7)
+        self.tbl_rx.setHorizontalHeaderLabels(["ID", "Data", "Paciente", "Medicação", "Dosagem", "Quantidade", "Tipo"])
+        self.tbl_rx.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_rx)
+
+        self.prescription_stack.addWidget(main_page)
+
+        # Página de prescrições hospitalares
+        hospital_page = QWidget()
+        h_layout = QVBoxLayout(hospital_page)
+        h_layout.addWidget(QLabel("<h3>Prescrições Hospitalares</h3>"))
+
+        back_btn = QPushButton("← Voltar")
+        back_btn.clicked.connect(lambda: self.prescription_stack.setCurrentIndex(0))
+        h_layout.addWidget(back_btn)
+
+        self.tbl_rx_hospital = QTableWidget(0, 6)
+        self.tbl_rx_hospital.setHorizontalHeaderLabels(
+            ["Data", "Paciente", "Medicação", "Dosagem", "Quantidade", "Instruções"])
+        self.tbl_rx_hospital.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        h_layout.addWidget(self.tbl_rx_hospital)
+
+        self.prescription_stack.addWidget(hospital_page)
+
+        # Página de receituários
+        outpatient_page = QWidget()
+        o_layout = QVBoxLayout(outpatient_page)
+        o_layout.addWidget(QLabel("<h3>Receituários para Casa</h3>"))
+
+        back_btn2 = QPushButton("← Voltar")
+        back_btn2.clicked.connect(lambda: self.prescription_stack.setCurrentIndex(0))
+        o_layout.addWidget(back_btn2)
+
+        self.tbl_rx_outpatient = QTableWidget(0, 6)
+        self.tbl_rx_outpatient.setHorizontalHeaderLabels(
+            ["Data", "Paciente", "Medicação", "Dosagem", "Quantidade", "Instruções"])
+        self.tbl_rx_outpatient.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        o_layout.addWidget(self.tbl_rx_outpatient)
+
+        self.prescription_stack.addWidget(outpatient_page)
+
+    def _populate_medications(self):
+        """Popula o combo de medicamentos"""
+        self.rx_medication.clear()
+        self.medication_map = {}
+        medications = self.pharmacy_service.list_medications()
+        for medication in medications:
+            # Mostrar status do estoque
+            status_text = ""
+            if medication.status == MedicationStatus.OUT_OF_STOCK:
+                status_text = " (SEM ESTOQUE)"
+            elif medication.status == MedicationStatus.LOW_STOCK:
+                status_text = " (ESTOQUE BAIXO)"
+
+            label = f"{medication.name} - {medication.stock_quantity} {medication.unit}{status_text}"
+            self.rx_medication.addItem(label)
+            self.medication_map[label] = medication
+
+    def _create_prescription(self):
+        """Cria uma nova prescrição"""
+        patient_id = self.pat_map.get(self.rx_patient.currentText())
+        if not patient_id:
+            QMessageBox.warning(self, "Erro", "Selecione um paciente.")
+            return
+
+        medication = self.medication_map.get(self.rx_medication.currentText())
+        if not medication:
+            QMessageBox.warning(self, "Erro", "Selecione um medicamento.")
+            return
+
+        # Verificar estoque para prescrições hospitalares
+        prescription_type = PrescriptionType.HOSPITAL if "Hospitalar" in self.rx_type.currentText() else PrescriptionType.OUTPATIENT
+        quantity = self.rx_quantity.value()
+
+        if prescription_type == PrescriptionType.HOSPITAL:
+            if medication.stock_quantity < quantity:
+                QMessageBox.warning(self, "Estoque Insuficiente",
+                                    f"Estoque atual: {medication.stock_quantity} {medication.unit}\n"
+                                    f"Quantidade solicitada: {quantity}")
+                return
+
+        prescription = Prescription(
+            patient_id=patient_id,
+            doctor_id=self.user_id,
+            created_at=datetime.now().isoformat(timespec='minutes'),
+            medication_id=medication.id,
+            medication_name=medication.name,
+            dosage=self.rx_dosage.text().strip(),
+            instructions=self.rx_instructions.toPlainText().strip(),  # toPlainText()
+            quantity=quantity,
+            prescription_type=prescription_type
+        )
+
+        try:
+            self.prescription_service.create_prescription(prescription)
+            QMessageBox.information(self, "Sucesso", "Prescrição criada com sucesso!")
+
+            # Limpar formulário
+            self.rx_dosage.clear()
+            self.rx_instructions.clear()
+            self.rx_quantity.setValue(1)
+
+            # Atualizar tabelas e medicamentos
+            self._refresh_rx_table()
+            self._populate_medications()
+            self._refresh_pharmacy()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao criar prescrição: {e}")
+
+    def _show_prescriptions_doctor(self, prescription_type: PrescriptionType):
+        """Navega para a página específica de prescrições sem loading"""
+        if prescription_type == PrescriptionType.HOSPITAL:
+            self.prescription_stack.setCurrentIndex(1)
+            self._refresh_hospital_prescriptions_doctor()
+        else:
+            self.prescription_stack.setCurrentIndex(2)
+            self._refresh_outpatient_prescriptions_doctor()
+
+    def _refresh_hospital_prescriptions_doctor(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_doctor(self.user_id)
+        hospital_prescriptions = [p for p in prescriptions if p.prescription_type == PrescriptionType.HOSPITAL]
+
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        self.tbl_rx_hospital.setRowCount(0)
+        for i, prescription in enumerate(hospital_prescriptions):
+            self.tbl_rx_hospital.insertRow(i)
+            self.tbl_rx_hospital.setItem(i, 0, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx_hospital.setItem(i, 1, QTableWidgetItem(patients.get(prescription.patient_id, 'Desconhecido')))
+            self.tbl_rx_hospital.setItem(i, 2, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx_hospital.setItem(i, 3, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx_hospital.setItem(i, 4, QTableWidgetItem(str(prescription.quantity)))
+            self.tbl_rx_hospital.setItem(i, 5, QTableWidgetItem(prescription.instructions or ''))
+
+    def _refresh_outpatient_prescriptions_doctor(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_doctor(self.user_id)
+        outpatient_prescriptions = [p for p in prescriptions if p.prescription_type == PrescriptionType.OUTPATIENT]
+
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        self.tbl_rx_outpatient.setRowCount(0)
+        for i, prescription in enumerate(outpatient_prescriptions):
+            self.tbl_rx_outpatient.insertRow(i)
+            self.tbl_rx_outpatient.setItem(i, 0, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx_outpatient.setItem(i, 1,
+                                           QTableWidgetItem(patients.get(prescription.patient_id, 'Desconhecido')))
+            self.tbl_rx_outpatient.setItem(i, 2, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx_outpatient.setItem(i, 3, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx_outpatient.setItem(i, 4, QTableWidgetItem(str(prescription.quantity)))
+            self.tbl_rx_outpatient.setItem(i, 5, QTableWidgetItem(prescription.instructions or ''))
+
+    def _refresh_rx_table(self):
+        prescriptions = self.prescription_service.get_prescriptions_for_doctor(self.user_id)
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        self.tbl_rx.setRowCount(0)
+        for i, prescription in enumerate(prescriptions):
+            self.tbl_rx.insertRow(i)
+            self.tbl_rx.setItem(i, 0, QTableWidgetItem(str(prescription.id)))
+            self.tbl_rx.setItem(i, 1, QTableWidgetItem(prescription.created_at[:16]))
+            self.tbl_rx.setItem(i, 2, QTableWidgetItem(patients.get(prescription.patient_id, 'Desconhecido')))
+            self.tbl_rx.setItem(i, 3, QTableWidgetItem(prescription.medication_name))
+            self.tbl_rx.setItem(i, 4, QTableWidgetItem(prescription.dosage or ''))
+            self.tbl_rx.setItem(i, 5, QTableWidgetItem(str(prescription.quantity)))
+            self.tbl_rx.setItem(i, 6, QTableWidgetItem(prescription.prescription_type.value))
+
+    # ----- Farmácia -----
+    def _build_farmacia(self):
+        w = self.tab_farmacia
+        v = QVBoxLayout(w)
+
+        # Título
+        title = QLabel("<h3>Sistema de Farmácia e Controle de Estoque</h3>")
+        v.addWidget(title)
+
+        # Formulário para adicionar medicamento
+        form_frame = QFrame()
+        form_frame.setObjectName("card")
+        form_layout = QGridLayout(form_frame)
+
+        form_layout.addWidget(QLabel("<b>Adicionar Novo Medicamento:</b>"), 0, 0, 1, 4)
+
+        self.med_name = QLineEdit();
+        self.med_name.setPlaceholderText("Nome do medicamento")
+        self.med_description = QLineEdit();
+        self.med_description.setPlaceholderText("Descrição")
+        self.med_unit = QLineEdit();
+        self.med_unit.setPlaceholderText("Unidade (ex: comprimido, ml)")
+        self.med_stock = QSpinBox();
+        self.med_stock.setMaximum(9999);
+        self.med_stock.setValue(0)
+        self.med_min_stock = QSpinBox();
+        self.med_min_stock.setMaximum(999);
+        self.med_min_stock.setValue(10)
+
+        form_layout.addWidget(QLabel("Nome:"), 1, 0)
+        form_layout.addWidget(self.med_name, 1, 1)
+        form_layout.addWidget(QLabel("Descrição:"), 1, 2)
+        form_layout.addWidget(self.med_description, 1, 3)
+        form_layout.addWidget(QLabel("Unidade:"), 2, 0)
+        form_layout.addWidget(self.med_unit, 2, 1)
+        form_layout.addWidget(QLabel("Estoque:"), 2, 2)
+        form_layout.addWidget(self.med_stock, 2, 3)
+        form_layout.addWidget(QLabel("Estoque Mín:"), 3, 0)
+        form_layout.addWidget(self.med_min_stock, 3, 1)
+
+        btn_add_med = QPushButton("Adicionar Medicamento")
+        btn_add_med.setProperty("accent", True)
+        btn_add_med.clicked.connect(self._add_medication)
+        form_layout.addWidget(btn_add_med, 3, 2, 1, 2)
+
+        v.addWidget(form_frame)
+
+        # Filtros de estoque
+        filter_layout = QHBoxLayout()
+        self.stock_filter = QComboBox()
+        self.stock_filter.addItems(["Todos", "Disponível", "Estoque Baixo", "Sem Estoque"])
+        self.stock_filter.currentTextChanged.connect(self._refresh_pharmacy)
+        filter_layout.addWidget(QLabel("Filtrar por status:"))
+        filter_layout.addWidget(self.stock_filter)
+        filter_layout.addStretch(1)
+        v.addLayout(filter_layout)
+
+        # Tabela de medicamentos
+        self.tbl_pharmacy = QTableWidget(0, 7)
+        self.tbl_pharmacy.setHorizontalHeaderLabels(["ID", "Nome", "Descrição", "Unidade", "Estoque", "Mín", "Status"])
+        self.tbl_pharmacy.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_pharmacy)
+
+    def _add_medication(self):
+        """Adiciona um novo medicamento"""
+        name = self.med_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Erro", "Nome do medicamento é obrigatório.")
+            return
+
+        medication = Medication(
+            name=name,
+            description=self.med_description.text().strip(),
+            unit=self.med_unit.text().strip(),
+            stock_quantity=self.med_stock.value(),
+            min_stock=self.med_min_stock.value(),
+            status=MedicationStatus.AVAILABLE if self.med_stock.value() > self.med_min_stock.value() else MedicationStatus.LOW_STOCK
+        )
+
+        try:
+            self.pharmacy_service.add_medication(medication)
+            QMessageBox.information(self, "Sucesso", "Medicamento adicionado com sucesso!")
+
+            # Limpar formulário
+            self.med_name.clear()
+            self.med_description.clear()
+            self.med_unit.clear()
+            self.med_stock.setValue(0)
+            self.med_min_stock.setValue(10)
+
+            self._refresh_pharmacy()
+            self._populate_medications()  # Atualizar combo de prescrições
+
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao adicionar medicamento: {e}")
+
+    def _refresh_pharmacy(self):
+        """Atualiza a tabela de medicamentos"""
+        medications = self.pharmacy_service.list_medications()
+
+        # Aplicar filtro
+        filter_text = self.stock_filter.currentText()
+        if filter_text != "Todos":
+            if filter_text == "Disponível":
+                medications = [m for m in medications if m.status == MedicationStatus.AVAILABLE]
+            elif filter_text == "Estoque Baixo":
+                medications = [m for m in medications if m.status == MedicationStatus.LOW_STOCK]
+            elif filter_text == "Sem Estoque":
+                medications = [m for m in medications if m.status == MedicationStatus.OUT_OF_STOCK]
+
+        self.tbl_pharmacy.setRowCount(0)
+        for i, medication in enumerate(medications):
+            self.tbl_pharmacy.insertRow(i)
+            self.tbl_pharmacy.setItem(i, 0, QTableWidgetItem(str(medication.id)))
+            self.tbl_pharmacy.setItem(i, 1, QTableWidgetItem(medication.name))
+            self.tbl_pharmacy.setItem(i, 2, QTableWidgetItem(medication.description or ''))
+            self.tbl_pharmacy.setItem(i, 3, QTableWidgetItem(medication.unit or ''))
+
+            # Colorir estoque baseado no status
+            stock_item = QTableWidgetItem(str(medication.stock_quantity))
+            if medication.status == MedicationStatus.OUT_OF_STOCK:
+                stock_item.setBackground(QColor(239, 68, 68))  # Vermelho
+            elif medication.status == MedicationStatus.LOW_STOCK:
+                stock_item.setBackground(QColor(250, 204, 21))  # Amarelo
+            self.tbl_pharmacy.setItem(i, 4, stock_item)
+
+            self.tbl_pharmacy.setItem(i, 5, QTableWidgetItem(str(medication.min_stock)))
+
+            # Status com cor
+            status_item = QTableWidgetItem(medication.status.value.replace('_', ' ').title())
+            if medication.status == MedicationStatus.OUT_OF_STOCK:
+                status_item.setBackground(QColor(239, 68, 68))
+            elif medication.status == MedicationStatus.LOW_STOCK:
+                status_item.setBackground(QColor(250, 204, 21))
+            else:
+                status_item.setBackground(QColor(16, 185, 129))  # Verde
+            self.tbl_pharmacy.setItem(i, 6, status_item)
+
+    # ----- Notas -----
+    def _build_notas(self):
+        w = self.tab_notas
+        v = QVBoxLayout(w)
+
+        # Seleção de paciente
+        top = QHBoxLayout()
+        self.notes_patient = QComboBox();
+        self._populate_patients_combo(self.notes_patient)
+        top.addWidget(QLabel("Paciente:"));
+        top.addWidget(self.notes_patient);
+        top.addStretch(1)
+        v.addLayout(top)
+
+        # Área de nova nota
+        form = QHBoxLayout()
+        self.note_input = QTextEdit();
+        self.note_input.setMaximumHeight(100)
+        self.note_input.setPlaceholderText("Adicione uma nota privada sobre o paciente...")
+        btn_add_note = QPushButton("Adicionar Nota");
+        btn_add_note.clicked.connect(self._add_note)
+        form.addWidget(self.note_input, 1);
+        form.addWidget(btn_add_note)
+        v.addLayout(form)
+
+        # Lista de notas
+        self.tbl_notes = QTableWidget(0, 3)
+        self.tbl_notes.setHorizontalHeaderLabels(["Data", "Paciente", "Conteúdo"])
+        self.tbl_notes.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_notes)
+
+        self.notes_patient.currentIndexChanged.connect(self._refresh_notes_table)
+
+    def _add_note(self):
+        pid = self.pat_map.get(self.notes_patient.currentText())
+        content = self.note_input.toPlainText().strip()
+        if not content: return
+        self.db.add_note(self.user_id, pid, content)
+        self.note_input.clear()
+        self._refresh_notes_table()
+
+    def _refresh_notes_table(self):
+        pid = self.pat_map.get(self.notes_patient.currentText()) if hasattr(self, 'notes_patient') else None
+        notes = self.db.list_notes(self.user_id, pid)
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        self.tbl_notes.setRowCount(0)
+        for i, (nid, created_at, content, patient_id) in enumerate(notes):
+            self.tbl_notes.insertRow(i)
+            self.tbl_notes.setItem(i, 0, QTableWidgetItem(created_at[:16]))
+            self.tbl_notes.setItem(i, 1, QTableWidgetItem(patients.get(patient_id, 'Desconhecido')))
+            self.tbl_notes.setItem(i, 2, QTableWidgetItem(content))
+
+    # ----- Novo: Gestão de Documentos -----
+    def _build_documents(self):
+        w = self.tab_documents
+        v = QVBoxLayout(w)
+
+        v.addWidget(QLabel("<h3>Gestão de Documentos e Consentimentos</h3>"))
+
+        # Formulário para upload de documentos diversos
+        form_layout = QHBoxLayout()
+        self.doc_patient = QComboBox()
+        self._populate_patients_combo(self.doc_patient)
+        self.doc_type = QComboBox()
+        self.doc_type.addItems(['Exame', 'Consentimento', 'Relatório Médico', 'Outro'])
+        self.doc_file_path = QLineEdit()
+        self.doc_file_path.setPlaceholderText("Caminho do arquivo")
+        btn_select_doc = QPushButton("Selecionar Arquivo")
+        btn_select_doc.clicked.connect(self._select_document_file)
+        btn_upload_doc = QPushButton("Upload Documento")
+        btn_upload_doc.setProperty("accent", True)
+        btn_upload_doc.clicked.connect(self._upload_document_file)
+
+        form_layout.addWidget(QLabel("Paciente:"))
+        form_layout.addWidget(self.doc_patient)
+        form_layout.addWidget(QLabel("Tipo:"))
+        form_layout.addWidget(self.doc_type)
+        form_layout.addWidget(self.doc_file_path, 1)
+        form_layout.addWidget(btn_select_doc)
+        form_layout.addWidget(btn_upload_doc)
+        v.addLayout(form_layout)
+
+        v.addWidget(QLabel("<h4>Documentos Anexados:</h4>"))
+        self.tbl_documents = QTableWidget(0, 5)
+        self.tbl_documents.setHorizontalHeaderLabels(["Paciente", "Nome do Arquivo", "Enviado em", "Tipo", "Ações"])
+        self.tbl_documents.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        v.addWidget(self.tbl_documents)
+
+        self._refresh_documents_table()
+
+    def _select_document_file(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Selecionar Documento", "", "Todos os Arquivos (*.*)")
+        if p:
+            self.doc_file_path.setText(p)
+
+    def _upload_document_file(self):
+        pid = self.pat_map.get(self.doc_patient.currentText())
+        if pid is None:
+            QMessageBox.warning(self, "Upload", "Selecione um paciente.")
+            return
+        fpath = self.doc_file_path.text()
+        if not fpath or not Path(fpath).is_file():
+            QMessageBox.warning(self, "Upload", "Selecione um arquivo válido.")
+            return
+
+        doc_type = self.doc_type.currentText()
+        exam_type_placeholder = "N/A"  # Para documentos que não são exames específicos
+
+        self.db.add_exam_file(patient_id=pid, doctor_id=self.user_id,
+                              exam_type=exam_type_placeholder,  # Usar placeholder
+                              file_path=fpath, document_type=doc_type)
+        self.doc_file_path.clear()
+        self._refresh_documents_table()
+        QMessageBox.information(self, "OK", "Documento anexado com sucesso!")
+
+    def _refresh_documents_table(self):
+        # Esta função é a mesma que _refresh_files_table, mas renomeada para clareza
+        # e chamada na aba de Documentos.
+        rows_all = []
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+        for patient in self.patient_service.list_all_patients():
+            for (fid, ex_type, fpath, up_at, doc_id, doc_type) in self.db.list_exam_files(patient.user_id):
+                rows_all.append((patient.full_name, fpath, up_at, doc_type, patient.user_id))
+        rows_all.sort(key=lambda r: r[2], reverse=True)
+        self.tbl_documents.setRowCount(0)
+        for i, (pname, fpath, up_at, doc_type, pid) in enumerate(rows_all):
+            self.tbl_documents.insertRow(i)
+            self.tbl_documents.setItem(i, 0, QTableWidgetItem(pname))
+            self.tbl_documents.setItem(i, 1, QTableWidgetItem(Path(fpath).name))
+            self.tbl_documents.setItem(i, 2, QTableWidgetItem(up_at[:16]))
+            self.tbl_documents.setItem(i, 3, QTableWidgetItem(doc_type))
+            cell = QWidget();
+            hl = QHBoxLayout(cell);
+            hl.setContentsMargins(0, 0, 0, 0)
+            btn = QPushButton("Abrir");
+            btn.clicked.connect(lambda _, p=fpath: webbrowser.open(str(Path(p).resolve())))
+            hl.addWidget(btn);
+            hl.addStretch(1)
+            self.tbl_documents.setCellWidget(i, 4, cell)
+
+    # ----- Novo: Telemedicina -----
+    def _build_telemedicine(self):
+        w = self.tab_telemedicine
+        v = QVBoxLayout(w)
+
+        v.addWidget(QLabel("<h3>Telemedicina e Consultas Virtuais</h3>"))
+        v.addWidget(QLabel("Esta seção permite iniciar videochamadas e chats em tempo real com pacientes agendados."))
+
+        # Placeholder para iniciar videochamada
+        video_layout = QHBoxLayout()
+        self.tele_patient = QComboBox()
+        self._populate_patients_combo(self.tele_patient)
+        btn_start_video = QPushButton("Iniciar Videochamada")
+        btn_start_video.setProperty("accent", True)
+        btn_start_video.clicked.connect(self._start_video_call)
+        video_layout.addWidget(QLabel("Paciente:"))
+        video_layout.addWidget(self.tele_patient)
+        video_layout.addWidget(btn_start_video)
+        video_layout.addStretch(1)
+        v.addLayout(video_layout)
+
+        v.addSpacing(20)
+        v.addWidget(QLabel("<h4>Chat em Tempo Real (Placeholder)</h4>"))
+        chat_area = QTextEdit()
+        chat_area.setReadOnly(True)
+        chat_area.setPlaceholderText("Histórico do chat em tempo real apareceria aqui...")
+        v.addWidget(chat_area)
+
+        chat_input_layout = QHBoxLayout()
+        chat_input = QLineEdit()
+        chat_input.setPlaceholderText("Digite sua mensagem...")
+        btn_send_chat = QPushButton("Enviar Chat")
+        btn_send_chat.clicked.connect(lambda: QMessageBox.information(self, "Chat",
+                                                                      "Funcionalidade de chat em tempo real seria implementada aqui."))
+        chat_input_layout.addWidget(chat_input)
+        chat_input_layout.addWidget(btn_send_chat)
+        v.addLayout(chat_input_layout)
+
+        v.addStretch(1)
+
+    def _start_video_call(self):
+        patient_name = self.tele_patient.currentText()
+        if not patient_name:
+            QMessageBox.warning(self, "Telemedicina", "Selecione um paciente para iniciar a videochamada.")
+            return
+        QMessageBox.information(self, "Telemedicina",
+                                f"Iniciando videochamada com {patient_name}...\n(Funcionalidade de integração com plataforma de videochamada seria implementada aqui)")
+
+    # ----- Novo: Insights de IA -----
+    def _build_ai_insights(self):
+        w = self.tab_ai_insights
+        v = QVBoxLayout(w)
+
+        v.addWidget(QLabel("<h3>Insights e Análises por Inteligência Artificial</h3>"))
+        v.addWidget(QLabel(
+            "Esta seção oferece ferramentas de IA para auxiliar no diagnóstico, tratamento e gestão de pacientes."))
+
+        # Alertas de Interação Medicamentosa
+        ai_layout = QVBoxLayout()
+        ai_layout.addWidget(QLabel("<h4>Alertas de Interação Medicamentosa:</h4>"))
+        btn_check_interactions = QPushButton("Verificar Interações para Paciente Selecionado")
+        btn_check_interactions.clicked.connect(self._check_drug_interactions)
+        ai_layout.addWidget(btn_check_interactions)
+        self.ai_interaction_output = QTextEdit()
+        self.ai_interaction_output.setReadOnly(True)
+        self.ai_interaction_output.setPlaceholderText("Resultados de interações medicamentosas aparecerão aqui...")
+        ai_layout.addWidget(self.ai_interaction_output)
+        v.addLayout(ai_layout)
+
+        v.addSpacing(20)
+
+        # Sugestão de Diagnósticos
+        ai_layout2 = QVBoxLayout()
+        ai_layout2.addWidget(QLabel("<h4>Sugestão de Diagnósticos (Experimental):</h4>"))
+        btn_suggest_diagnosis = QPushButton("Sugerir Diagnóstico para Paciente Selecionado")
+        btn_suggest_diagnosis.clicked.connect(self._suggest_diagnosis)
+        ai_layout2.addWidget(btn_suggest_diagnosis)
+        self.ai_diagnosis_output = QTextEdit()
+        self.ai_diagnosis_output.setReadOnly(True)
+        self.ai_diagnosis_output.setPlaceholderText(
+            "Sugestões de diagnóstico baseadas no histórico do paciente aparecerão aqui...")
+        ai_layout2.addWidget(self.ai_diagnosis_output)
+        v.addLayout(ai_layout2)
+
+        v.addStretch(1)
+
+    def _check_drug_interactions(self):
+        # Placeholder para lógica de IA
+        QMessageBox.information(self, "Interações Medicamentosas",
+                                "Funcionalidade de verificação de interações medicamentosas seria implementada aqui, usando dados de prescrições do paciente.")
+        self.ai_interaction_output.setPlainText(
+            "Nenhuma interação medicamentosa grave detectada para as prescrições ativas do paciente (DEMO).")
+
+    def _suggest_diagnosis(self):
+        # Placeholder para lógica de IA
+        QMessageBox.information(self, "Sugestão de Diagnóstico",
+                                "Funcionalidade de sugestão de diagnóstico seria implementada aqui, analisando anamnese, exames e sintomas.")
+        self.ai_diagnosis_output.setPlainText(
+            "Baseado nos dados disponíveis, possíveis diagnósticos incluem: Gripe Comum, Rinite Alérgica (DEMO).")
+
+    # ----- Relatórios -----
+    def _build_relatorios(self):
+        w = self.tab_relatorios
+        v = QVBoxLayout(w)
+        info = QLabel("Exportações e Relatórios")
+        v.addWidget(info)
+
+        hb = QHBoxLayout()
+        btn_csv = QPushButton("Exportar agenda (CSV)")
+        btn_csv.clicked.connect(self._export_agenda_csv)
+        btn_pdf = QPushButton("Gerar relatório PDF")
+        btn_pdf.clicked.connect(self._gerar_pdf_doctor)
+        hb.addWidget(btn_csv);
+        hb.addWidget(btn_pdf);
+        hb.addStretch(1)
+        v.addLayout(hb)
+
+    def _export_agenda_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Agenda", "agenda.csv", "CSV (*.csv)")
+        if not path: return
+
+        appointments = self.appointment_service.get_appointments_for_doctor(self.user_id)
+        patients = {p.user_id: p.full_name for p in self.patient_service.list_all_patients()}
+
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "Data/Hora", "Motivo", "Status", "Paciente", "Anamnese", "Notas"])
+            for app in appointments:
+                writer.writerow([app.id, app.date_time, app.reason or '', app.status.value,
+                                 patients.get(app.patient_id, 'Desconhecido'), app.anamnesis or '', app.notes or ''])
+        QMessageBox.information(self, "CSV", "Agenda exportada!")
+
+    def _gerar_pdf_doctor(self):
+        if not REPORTLAB_OK:
+            QMessageBox.warning(self, "PDF", "ReportLab não instalado.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Salvar PDF", "relatorio_medico.pdf", "PDF (*.pdf)")
+        if not path: return
+
+        doctor = self.doctor_service.get_doctor(self.user_id)
+        appointments = self.appointment_service.get_appointments_for_doctor(self.user_id)
+        prescriptions = self.prescription_service.get_prescriptions_for_doctor(self.user_id)
+        patients_data = {p.user_id: p for p in self.patient_service.list_all_patients()}
+
+        doc = SimpleDocTemplate(path, pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+
+        # Título
+        story.append(
+            Paragraph(f"<b>Relatório Médico - Dr. {doctor.full_name if doctor else 'Médico'}</b>", styles['h1']))
+        story.append(Spacer(1, 12))
+
+        # Dados do Médico
+        if doctor:
+            story.append(
+                Paragraph(f"<b>Especialidade:</b> {doctor.specialty} | <b>CRM:</b> {doctor.crm}", styles['Normal']))
+            story.append(Spacer(1, 12))
+
+        # Consultas/Anamneses
+        story.append(Paragraph("<b>Consultas/Anamneses:</b>", styles['h2']))
+        if appointments:
+            data = [["Data/Hora", "Paciente", "Motivo", "Status", "Anamnese", "Notas"]]
+            for app in appointments:
+                patient_name = patients_data.get(app.patient_id,
+                                                 Patient(user_id=0, full_name='Desconhecido', cpf='', birthdate='',
+                                                         age=0)).full_name
+                data.append([app.date_time[:16], patient_name, app.reason or '', app.status.value, app.anamnesis or '',
+                             app.notes or ''])
+            table = Table(data, colWidths=[80, 100, 100, 60, 100, 100])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhuma consulta/anamnese registrada.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Prescrições
+        story.append(Paragraph("<b>Prescrições:</b>", styles['h2']))
+        if prescriptions:
+            data = [["Data", "Paciente", "Medicação", "Dosagem", "Quantidade", "Tipo"]]
+            for rx in prescriptions:
+                patient_name = patients_data.get(rx.patient_id,
+                                                 Patient(user_id=0, full_name='Desconhecido', cpf='', birthdate='',
+                                                         age=0)).full_name
+                data.append([rx.created_at[:16], patient_name, rx.medication_name, rx.dosage or '', str(rx.quantity),
+                             rx.prescription_type.value])
+            table = Table(data, colWidths=[80, 100, 100, 80, 60, 80])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(table)
+        else:
+            story.append(Paragraph("Nenhuma prescrição registrada.", styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        try:
+            doc.build(story)
+            QMessageBox.information(self, "PDF", "Relatório gerado com sucesso!")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao Gerar PDF", f"Ocorreu um erro: {e}")
+
+    # ----- Config -----
+    def _build_config(self):
+        w = self.tab_config
+        v = QVBoxLayout(w)
+        info = QLabel("Configurações")
+        v.addWidget(info)
+
+        current_settings = self.db.get_settings(self.user_id)
+
+        # Configuração de Tema
+        theme_row = QHBoxLayout()
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(['dark', 'light', 'high_contrast'])
+        self.theme_combo.setCurrentText(current_settings.theme)
+        self.theme_combo.currentTextChanged.connect(self.apply_theme)
+        theme_row.addWidget(QLabel("Tema da Interface:"))
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch(1)
+        v.addLayout(theme_row)
+
+        # Configuração de Idioma (Placeholder)
+        lang_row = QHBoxLayout()
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItems(['pt_BR', 'en_US'])
+        self.lang_combo.setCurrentText(current_settings.language)
+        self.lang_combo.currentTextChanged.connect(lambda lang: QMessageBox.information(self, "Idioma",
+                                                                                        f"Idioma alterado para {lang}. Reinicie o aplicativo para aplicar (DEMO)."))
+        lang_row.addWidget(QLabel("Idioma (requer reinício):"))
+        lang_row.addWidget(self.lang_combo)
+        lang_row.addStretch(1)
+        v.addLayout(lang_row)
+
+        # Configuração de Acessibilidade (Placeholder)
+        access_row = QHBoxLayout()
+        self.chk_accessibility = QCheckBox("Modo de Acessibilidade (Alto Contraste/Fonte Grande)")
+        self.chk_accessibility.setChecked(current_settings.accessibility_mode)
+        self.chk_accessibility.stateChanged.connect(self._toggle_accessibility_mode)
+        access_row.addWidget(self.chk_accessibility)
+        access_row.addStretch(1)
+        v.addLayout(access_row)
+
+        # Configuração de 2FA
+        two_factor_row = QHBoxLayout()
+        self.btn_setup_2fa = QPushButton("Configurar Autenticação de Dois Fatores (2FA)")
+        self.btn_setup_2fa.clicked.connect(self._setup_two_factor_auth)
+        two_factor_row.addWidget(self.btn_setup_2fa)
+        two_factor_row.addStretch(1)
+        v.addLayout(two_factor_row)
+
+        v.addStretch(1)
+
+    def _toggle_accessibility_mode(self, state):
+        is_checked = bool(state)
+        settings = self.db.get_settings(self.user_id)
+        settings.accessibility_mode = is_checked
+        self.db.set_settings(settings)
+        if is_checked:
+            self.apply_theme('high_contrast')
+            QMessageBox.information(self, "Acessibilidade",
+                                    "Modo de Acessibilidade ativado. O tema foi alterado para Alto Contraste.")
+        else:
+            # Volta para o tema anterior ou padrão
+            self.apply_theme(settings.theme if settings.theme != 'high_contrast' else 'dark')
+            QMessageBox.information(self, "Acessibilidade", "Modo de Acessibilidade desativado.")
+
+    def _setup_two_factor_auth(self):
+        # Placeholder para configuração 2FA
+        # Em um sistema real, você geraria um secret e um QR code para o usuário escanear.
+        # Para demonstração, vamos apenas "configurar" um secret fixo.
+        user = self.db.get_user_by_username(self.db.get_doctor(self.user_id).doctor_login,
+                                            UserRole.DOCTOR)  # Ou paciente
+        if user.two_factor_secret:
+            QMessageBox.information(self, "2FA", "2FA já está configurado para este usuário.")
+            return
+
+        reply = QMessageBox.question(self, "Configurar 2FA",
+                                     "Deseja configurar a autenticação de dois fatores?\n(Isso é uma demonstração. Em um sistema real, você veria um QR Code.)",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            # Simula a geração de um secret
+            secret = "123456"  # Em um sistema real, seria pyotp.random_base32()
+            self.db.update_two_factor_secret(self.user_id, secret)
+            QMessageBox.information(self, "2FA",
+                                    f"2FA configurado com sucesso! Seu 'secret' de demonstração é: {secret}\n"
+                                    "Na próxima vez que você logar, será solicitado um código 2FA.\n"
+                                    "Para testar, use o código '000000' ou o secret '123456' (se for médico).")
+        else:
+            QMessageBox.information(self, "2FA", "Configuração de 2FA cancelada.")
+
+
+# --------------------------- APP MAIN ---------------------------
+
+def main():
+    app = QApplication(sys.argv)
+    db = DB()
+    # Recalcula escala e estilos agora que a QApplication existe
+    _recompute_scaled_styles()
+    app.setStyleSheet(QSS_DARK)
+    win = LoginWindow(db)
+    win.show()
+    sys.exit(app.exec_())
+if __name__ == "__main__":
+    main()
